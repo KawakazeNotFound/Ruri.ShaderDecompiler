@@ -43,6 +43,7 @@ internal static class ComponentReadLoweringStage
         context.ProcessedBitcasts = processedBitcasts;
 
         List<SpirvInstruction> instructions = context.Module.Instructions;
+        var scalarDefinitions = Ruri.ShaderTools.Spirv.Analysis.ResultIdTable.Build(context.Module);
 
         for (int index = 0; index < instructions.Count; index++)
         {
@@ -98,7 +99,7 @@ internal static class ComponentReadLoweringStage
 
             if (translation is null || !context.UniformPointerTypes.TryGetValue(translation.MemberTypeId, out uint pointerTypeId))
             {
-                continue;
+                throw new InvalidOperationException("Admitted constant-buffer component no longer translates.");
             }
 
             // Capture before the extract is retired — the new load adopts its id.
@@ -110,34 +111,15 @@ internal static class ComponentReadLoweringStage
             instructions.Insert(index, BuildChain(context.Module, chainOpCode, pointerTypeId, pointerResultId,
                 load.AccessChain.BaseVariableId, translation.Indices));
 
-            instructions.Insert(index + 1, context.Module.CreateInstruction(SpvOpCode.OpLoad,
-            [
-                SpvOpCode.MakeInstructionWord(SpvOpCode.OpLoad, 4),
-                translation.MemberTypeId, extractResultId, pointerResultId,
-            ]));
-
-            // Two instructions inserted ahead of the extract; step past both so
-            // the loop resumes at the instruction that followed it.
-            index += 2;
+            var scalarReads = LegacyDx11ConstantBufferSafety.ScalarRead(context.Module, scalarDefinitions,
+                translation.MemberTypeId, instruction[1], extractResultId, pointerResultId);
+            instructions.InsertRange(index + 1, scalarReads);
+            // Skip the chain, typed load and optional bitcast, then retire the original extract.
+            index += 1 + scalarReads.Count;
             instruction.MakeNop();
         }
 
-        // Loads whose only reader consumed the whole vector never entered the
-        // rewrite branch above. Re-type them so they stay valid against the new
-        // pointer type.
-        foreach (TrackedLoad load in trackedLoads.Values)
-        {
-            SpirvInstruction instruction = load.Instruction;
-            if (instruction.OpCode != SpvOpCode.OpLoad || instruction.WordCount < 4)
-            {
-                continue;
-            }
-
-            if (!load.HasComponentReaders && load.AccessChain.Translation is not null)
-            {
-                instruction[1] = load.AccessChain.Translation.MemberTypeId;
-            }
-        }
+        LegacyDx11ConstantBufferSafety.RestoreWholeScalarReads(context);
     }
 
     private static SpirvInstruction BuildChain(

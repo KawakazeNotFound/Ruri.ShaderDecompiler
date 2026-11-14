@@ -48,7 +48,7 @@ internal sealed class DecompilePipeline
     {
         SerializedProgramData symbols = options.Symbols ?? new SerializedProgramData();
         ShaderBinaryFormat format = ShaderBinaryFormatDetector.Detect(options.Format, binary);
-        uint shaderModel = Math.Max(options.ShaderModel, MinimumEmitShaderModel);
+        uint shaderModel = options.ShaderModel; // Experimental DX11: honor the caller's explicit target.
 
         var result = new DecompileResult { FinalSymbols = symbols, FinalUnityMetadata = options.UnityMetadata };
         DecompileStage stage = DecompileStage.FrontendConversion;
@@ -59,6 +59,8 @@ internal sealed class DecompilePipeline
 
             stage = DecompileStage.ScalarLayoutNormalization;
             byte[] spirv = ScalarBlockVectorizer.Vectorize(frontend.Spirv);
+            if (shaderModel == 50) spirv = LegacyDx11UnsignedFloatLowering.Apply(spirv);
+            if (shaderModel == 50) spirv = LegacyDx11GeometryStreamLowering.Apply(spirv);
 
             stage = DecompileStage.InterstageSlotAssignment;
             spirv = InterstageSlotAssigner.Assign(spirv);
@@ -66,6 +68,7 @@ internal sealed class DecompilePipeline
 
             stage = DecompileStage.ConstantBufferStructuring;
             byte[] structured = Structure(spirv, symbols);
+            if (shaderModel == 50) structured = LegacyDx11MatrixRegisterLowering.Apply(spirv, structured);
             result.SpirvAfterStructuring = structured;
 
             stage = DecompileStage.SymbolBinding;
@@ -73,6 +76,7 @@ internal sealed class DecompilePipeline
 
             stage = DecompileStage.SymbolInjection;
             (byte[] injected, List<FlattenedBlock> flattened) = Inject(structured, symbols, bound);
+            if (shaderModel == 50) injected = LegacyDx11UnityIdentifierNaming.Apply(injected);
             result.SpirvAfterSymbolInjection = injected;
 
             stage = DecompileStage.SourceEmission;
@@ -328,7 +332,20 @@ internal sealed class DecompilePipeline
 
     private string Emit(byte[] spirv, SerializedProgramData symbols, EmissionPlan plan)
     {
-        string? source = _driver.Emit(spirv, plan);
+        string? source;
+        if (plan.ShaderModel == 50 && plan.Language == EmitLanguage.Hlsl)
+        {
+            (byte[] emitSpirv, uint? positionInputLocation) = LegacyDx11GeometryPositionInput.Lower(spirv);
+            source = _driver.Emit(emitSpirv, plan);
+            if (source is not null && positionInputLocation is uint sentinelLocation)
+            {
+                source = LegacyDx11GeometryPositionInput.RestoreSemantic(source, sentinelLocation);
+            }
+        }
+        else
+        {
+            source = _driver.Emit(spirv, plan);
+        }
         if (source is not null)
         {
             return source;

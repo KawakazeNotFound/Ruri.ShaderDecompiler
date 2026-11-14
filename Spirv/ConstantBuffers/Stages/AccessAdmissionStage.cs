@@ -28,11 +28,13 @@ internal static class AccessAdmissionStage
         // One index for the whole stage. Admission only reads — it never mutates —
         // so a single snapshot serves every plan.
         OperandUseIndex uses = OperandUseIndex.Build(context.Module);
+        LiveUseCounter live = LiveUseCounter.Build(context.Module);
+        ResultIdTable definitions = ResultIdTable.Build(context.Module);
 
         var survived = new List<BlockRewritePlan>(context.Plans.Count);
         foreach (BlockRewritePlan plan in context.Plans)
         {
-            if (!AllChainsRewritable(context, uses, plan, out string? failure))
+            if (!AllChainsRewritable(context, uses, live, definitions, plan, out string? failure))
             {
                 context.Note(plan, $"rewrite validation failed: {failure}");
                 continue;
@@ -50,6 +52,8 @@ internal static class AccessAdmissionStage
     private static bool AllChainsRewritable(
         StructuringContext context,
         OperandUseIndex uses,
+        LiveUseCounter live,
+        ResultIdTable definitions,
         BlockRewritePlan plan,
         out string? failure)
     {
@@ -73,13 +77,15 @@ internal static class AccessAdmissionStage
                 return false;
             }
 
-            bool direct = AccessTranslator.Translate(plan.Layout, path, context.Constants) is not null;
+            var translation = AccessTranslator.Translate(plan.Layout, path, context.Constants);
+            bool direct = translation is not null && (LegacyDx11ConstantBufferSafety.PointerElementMatches(definitions, instruction, translation.MemberTypeId)
+                || LegacyDx11ConstantBufferSafety.CanReadScalarDirect(uses, live, definitions, instruction, translation.MemberTypeId));
             if (direct)
             {
                 continue;
             }
 
-            if (ComponentReadProbe.CanLowerAllReads(uses, instruction[2], plan.Layout, path, context.Constants))
+            if (LegacyDx11ConstantBufferSafety.CanLowerAllReads(context, uses, live, definitions, instruction[2], plan.Layout, path))
             {
                 continue;
             }

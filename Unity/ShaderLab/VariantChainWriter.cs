@@ -36,7 +36,7 @@ internal static class VariantChainWriter
         // buffer loads) that the legacy compiler path rejects. DXC accepts them
         // and lifts the target to the maximum the D3D11 backend allows.
         writer.Line("#pragma target 5.0");
-        writer.Line("#pragma use_dxc");
+        // Experimental DX11 profile: FXC / SM5.0; no DXIL compiler pragma.
 
         // HLSLSupport.cginc is what DEFINES the SHADER_STAGE_* macros. Without it
         // Unity does not set them for a plain HLSLPROGRAM block, so every
@@ -63,7 +63,7 @@ internal static class VariantChainWriter
         // makes a set mutually exclusive, which is wrong for independent toggles.
         foreach (string keyword in KeywordSymbols.ForPass(names, pass))
         {
-            writer.Line($"#pragma multi_compile_local _ {keyword}");
+            writer.Line($"#pragma multi_compile _ {keyword}");
         }
 
         writer.Blank();

@@ -271,6 +271,6 @@ internal static class BlockLayoutBuilder
         int arrayLength = Math.Max(symbol.ArraySize, 1);
         return symbol.IsMatrix
             ? symbol.ColumnCount * 16 * arrayLength
-            : symbol.RowCount * symbol.ColumnCount * arrayLength * 4;
+            : arrayLength > 1 ? 16 * arrayLength : symbol.RowCount * symbol.ColumnCount * 4;
     }
 }

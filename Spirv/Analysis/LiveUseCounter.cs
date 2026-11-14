@@ -38,6 +38,8 @@ internal sealed class LiveUseCounter
         return new LiveUseCounter(counts);
     }
 
+    public int ConsumerCount(uint id) => id < (uint)_counts.Length ? _counts[id] : 0;
+
     public bool HasLiveConsumer(uint id) => id < (uint)_counts.Length && _counts[id] > 0;
 
     /// Drop <paramref name="instruction"/> from the live graph and collapse it

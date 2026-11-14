@@ -83,6 +83,13 @@ internal static class AccessTranslator
             ? new AccessTranslation { Indices = new List<uint>(2) { id0, id1 }, MemberTypeId = memberTypeId }
             : null;
 
+    public static AccessTranslation? Build(ConstantValueMap constants, uint memberTypeId, int index0, int index1, int index2)
+        => constants.TryGetId((uint)index0, out uint id0)
+            && constants.TryGetId((uint)index1, out uint id1)
+            && constants.TryGetId((uint)index2, out uint id2)
+            ? new AccessTranslation { Indices = new List<uint>(3) { id0, id1, id2 }, MemberTypeId = memberTypeId }
+            : null;
+
     // ---- containment -------------------------------------------------------
 
     // Does `member` own this byte? Arrays, matrices and structs accept any byte
@@ -134,17 +141,26 @@ internal static class AccessTranslator
 
         if (shape.Kind == MemberShapeKind.Matrix)
         {
-            if (localRegister < 0 || localRegister >= shape.Columns)
+            int arrayLength = Math.Max(shape.ArrayLength, 1);
+            if (localRegister < 0 || shape.Columns <= 0 || localRegister >= shape.Columns * arrayLength)
             {
                 return null;
             }
 
-            // matrix[col] yields a column VECTOR, not a matrix.
+            int arrayIndex = localRegister / shape.Columns;
+            int columnIndex = localRegister % shape.Columns;
+
+            // matrix[col] (or matrix[elem][col]) yields a column VECTOR, not a matrix.
             if (extraIndices.Count == 0)
             {
-                return member.ColumnVectorTypeId != 0
-                    ? Build(constants, member.ColumnVectorTypeId, localRegister)
-                    : null;
+                if (member.ColumnVectorTypeId == 0)
+                {
+                    return null;
+                }
+
+                return arrayLength > 1
+                    ? Build(constants, member.ColumnVectorTypeId, arrayIndex, columnIndex)
+                    : Build(constants, member.ColumnVectorTypeId, columnIndex);
             }
 
             if (componentIndex < 0 || componentIndex >= shape.Rows || hasTrailingIndices || member.ScalarTypeId == 0)
@@ -152,8 +168,10 @@ internal static class AccessTranslator
                 return null;
             }
 
-            // matrix[col][component] yields a scalar.
-            return Build(constants, member.ScalarTypeId, localRegister, componentIndex);
+            // matrix[col][component] (or matrix[elem][col][component]) yields a scalar.
+            return arrayLength > 1
+                ? Build(constants, member.ScalarTypeId, arrayIndex, columnIndex, componentIndex)
+                : Build(constants, member.ScalarTypeId, columnIndex, componentIndex);
         }
 
         if (member.RegisterCount == 1)
