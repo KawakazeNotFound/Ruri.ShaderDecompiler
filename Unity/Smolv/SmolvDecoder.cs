@@ -137,7 +137,7 @@ public static class SmolvDecoder
 		while (input.BaseStream.Position < inputEndPosition)
 		{
 			// read length + opcode
-			if (!ReadLengthOp(input, out uint instrLen, out SpvOp op))
+			if (!ReadLengthOp(input, inputEndPosition, out uint instrLen, out SpvOp op))
 			{
 				return false;
 			}
@@ -153,7 +153,7 @@ public static class SmolvDecoder
 			// read type as varint, if we have it
 			if (op.OpHasType(knownOpsCount))
 			{
-				if (!ReadVarint(input, out uint value))
+				if (!ReadVarint(input, inputEndPosition, out uint value))
 				{
 					return false;
 				}
@@ -165,7 +165,7 @@ public static class SmolvDecoder
 			// read result as delta+varint, if we have it
 			if (op.OpHasResult(knownOpsCount))
 			{
-				if (!ReadVarint(input, out uint value))
+				if (!ReadVarint(input, inputEndPosition, out uint value))
 				{
 					return false;
 				}
@@ -179,7 +179,7 @@ public static class SmolvDecoder
 			// Decorate: IDs relative to previous decorate
 			if (op == SpvOp.Decorate || op == SpvOp.MemberDecorate)
 			{
-				if (!ReadVarint(input, out uint value))
+				if (!ReadVarint(input, inputEndPosition, out uint value))
 				{
 					return false;
 				}
@@ -209,7 +209,7 @@ public static class SmolvDecoder
 				for (int m = 0; m < count; m++)
 				{
 					//read member index
-					if (!ReadVarint(input, out uint memberIndex))
+					if (!ReadVarint(input, inputEndPosition, out uint memberIndex))
 					{
 						return false;
 					}
@@ -218,7 +218,7 @@ public static class SmolvDecoder
 					prevIndex = memberIndex;
 
 					//decoration (and length if not common/known)
-					if (!ReadVarint(input, out uint memberDec))
+					if (!ReadVarint(input, inputEndPosition, out uint memberDec))
 					{
 						return false;
 					}
@@ -227,7 +227,7 @@ public static class SmolvDecoder
 					uint memberLen;
 					if (knownExtraOps == -1)
 					{
-						if (!ReadVarint(input, out memberLen))
+						if (!ReadVarint(input, inputEndPosition, out memberLen))
 						{
 							return false;
 						}
@@ -255,7 +255,7 @@ public static class SmolvDecoder
 							return false;
 						}
 
-						if (!ReadVarint(input, out uint val))
+						if (!ReadVarint(input, inputEndPosition, out uint val))
 						{
 							return false;
 						}
@@ -268,7 +268,7 @@ public static class SmolvDecoder
 					{
 						for (uint i = 4; i < memberLen; ++i)
 						{
-							if (!ReadVarint(input, out uint val))
+							if (!ReadVarint(input, inputEndPosition, out uint val))
 							{
 								return false;
 							}
@@ -299,7 +299,7 @@ public static class SmolvDecoder
 			}
 			for (int i = 0; i < relativeCount && ioffs < instrLen; ++i, ++ioffs)
 			{
-				if (!ReadVarint(input, out uint value))
+				if (!ReadVarint(input, inputEndPosition, out uint value))
 				{
 					return false;
 				}
@@ -336,7 +336,7 @@ public static class SmolvDecoder
 				// read rest of words with variable encoding
 				for (; ioffs < instrLen; ++ioffs)
 				{
-					if (!ReadVarint(input, out uint value))
+					if (!ReadVarint(input, inputEndPosition, out uint value))
 					{
 						return false;
 					}
@@ -410,31 +410,34 @@ public static class SmolvDecoder
 		return true;
 	}
 
-	private static bool ReadVarint(BinaryReader input, out uint value)
+	private static bool ReadVarint(BinaryReader input, long inputEndPosition, out uint value)
 	{
-		uint v = 0;
-		int shift = 0;
-		while (input.BaseStream.Position < input.BaseStream.Length)
+		value = default;
+		uint decoded = 0;
+		Stream stream = input.BaseStream;
+		for (int shift = 0; shift <= 28 && stream.Position < inputEndPosition; shift += 7)
 		{
-			byte b = input.ReadByte();
-			v |= unchecked((uint)(b & 127) << shift);
-			shift += 7;
-			if ((b & 128) == 0)
+			int next = stream.ReadByte();
+			if (next < 0 || (shift == 28 && next > 0x0F))
 			{
-				break;
+				return false;
+			}
+
+			decoded |= (uint)(next & 0x7F) << shift;
+			if ((next & 0x80) == 0)
+			{
+				value = decoded;
+				return true;
 			}
 		}
-
-		value = v;
-		// @TODO: report failures
-		return true;
+		return false;
 	}
 
-	private static bool ReadLengthOp(BinaryReader input, out uint len, out SpvOp op)
+	private static bool ReadLengthOp(BinaryReader input, long inputEndPosition, out uint len, out SpvOp op)
 	{
 		len = default;
 		op = default;
-		if (!ReadVarint(input, out uint value))
+		if (!ReadVarint(input, inputEndPosition, out uint value))
 		{
 			return false;
 		}
