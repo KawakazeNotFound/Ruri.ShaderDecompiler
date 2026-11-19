@@ -85,6 +85,18 @@ internal static class ShaderLabDeclarations
         writer.Line("}");
     }
 
+    public static string? EnginePassKeyword(IEnumerable<UnityTagMapEntry> emittedTags)
+        => emittedTags.LastOrDefault(tag => string.Equals(tag.First, "LightMode", StringComparison.OrdinalIgnoreCase))
+            ?.Second.ToUpperInvariant() switch
+        {
+            "FORWARDBASE" => "UNITY_PASS_FORWARDBASE",
+            "FORWARDADD" => "UNITY_PASS_FORWARDADD",
+            "DEFERRED" => "UNITY_PASS_DEFERRED",
+            "SHADOWCASTER" => "UNITY_PASS_SHADOWCASTER",
+            "META" => "UNITY_PASS_META",
+            _ => null,
+        };
+
     /// <summary>
     /// Drop pass tags whose key AND value already appear on the SubShader.
     ///

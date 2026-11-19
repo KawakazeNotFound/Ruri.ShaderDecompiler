@@ -28,7 +28,8 @@ internal static class VariantChainWriter
         UnitySerializedPass pass,
         int subShaderIndex,
         int passIndex,
-        VariantFileSet variants)
+        VariantFileSet variants,
+        string? enginePassKeyword)
     {
         writer.Line("HLSLPROGRAM");
 
@@ -59,10 +60,11 @@ internal static class VariantChainWriter
         // could ever be taken and every variant fell through to the catch-all.
         List<string> names = EffectiveKeywordNames(keywordNames, pass);
 
-        // One multi_compile_local per keyword, deliberately NOT bundled. Bundling
+        // One multi_compile per variant keyword, deliberately NOT bundled. Bundling
         // makes a set mutually exclusive, which is wrong for independent toggles.
         foreach (string keyword in KeywordSymbols.ForPass(names, pass))
         {
+            if (keyword == enginePassKeyword) continue;
             writer.Line($"#pragma multi_compile _ {keyword}");
         }
 

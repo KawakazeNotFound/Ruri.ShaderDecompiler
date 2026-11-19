@@ -160,15 +160,16 @@ public static class ShaderLabWriter
 
         // SubShader tags inherit into every pass, so a pass only declares what it
         // adds or overrides. Both tag maps get the same treatment.
-        ShaderLabDeclarations.WriteTags(writer, ShaderLabDeclarations.WithoutInherited(pass.State.Tags.Tags, subShader.Tags.Tags));
-        if (pass.Tags.Tags.Count > 0)
-        {
-            ShaderLabDeclarations.WriteTags(writer, ShaderLabDeclarations.WithoutInherited(pass.Tags.Tags, subShader.Tags.Tags));
-        }
+        var subShaderTags = subShader.Tags.Tags;
+        var stateTags = ShaderLabDeclarations.WithoutInherited(pass.State.Tags.Tags, subShaderTags);
+        var passTags = ShaderLabDeclarations.WithoutInherited(pass.Tags.Tags, subShaderTags);
+        ShaderLabDeclarations.WriteTags(writer, stateTags);
+        ShaderLabDeclarations.WriteTags(writer, passTags);
 
         if (HasAnyProgram(pass))
         {
-            VariantChainWriter.WriteProgram(writer, metadata.ParsedForm.KeywordNames, pass, subShaderIndex, passIndex, variants);
+            string? enginePassKeyword = ShaderLabDeclarations.EnginePassKeyword(subShaderTags.Concat(stateTags).Concat(passTags));
+            VariantChainWriter.WriteProgram(writer, metadata.ParsedForm.KeywordNames, pass, subShaderIndex, passIndex, variants, enginePassKeyword);
         }
 
         writer.Unindent();
