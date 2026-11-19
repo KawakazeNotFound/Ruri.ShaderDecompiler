@@ -27,17 +27,20 @@ public sealed class LegacyDx11GeometrySourceProof
     public uint BlobIndex { get; internal set; }
     public string BeforeSha256 { get; internal set; } = "";
     public string AfterSha256 { get; internal set; } = "";
+    public bool ZeroEmissionFromDxbc { get; internal set; }
     public List<string> PaddingSemantics { get; } = new();
 }
 
 /// <summary>
 /// Restricted VS -> triangle GS -> PS source-interface linker. It changes only
-/// struct declarations, transactionally. Never edits main, primitive arity,
-/// maxvertexcount, stream operations, storage, or arithmetic. The source proof
-/// deliberately does not claim original DXBC identity, compilation, or rendering.
+/// interface declarations and PrimitiveID entry glue, transactionally. Return-only
+/// variants can be recovered from the original DXBC input contract; this does not
+/// claim compilation or rendering equivalence.
 /// </summary>
 public static class LegacyDx11GeometryInterfaceLinker
 {
+    private const string PrimitiveIdSemantic = "SV_PrimitiveID";
+    private const string PrimitiveIdParameter = "_ruri_geometry_primitive_id";
     private sealed class Unsupported : Exception { public Unsupported(string message) : base(message) { } }
     private sealed record Field(string Name, string Semantic, string Type, string Mode)
     {
@@ -60,13 +63,19 @@ public static class LegacyDx11GeometryInterfaceLinker
         public string Mask = "";
         public Interface Input = null!;
         public Interface Output = null!;
+        public LegacyDx11ZeroEmissionGeometry.Proof? ZeroEmission;
         public List<(Interface Region, List<Field> Fields)> Plans = new();
+        public List<(int Start, int Length, string Text)> EntryEdits = new();
         public List<string> Padding = new();
         public HashSet<ushort> Keywords = new();
     }
     private static readonly Regex FieldPattern = new(@"^\s*(?<mode>(?:(?:linear|centroid|noperspective|sample|nointerpolation)\s+)*)(?<type>(?:float|half|min16float|min10float|int|uint|min16int|min16uint|bool)[1-4]?)\s+(?<name>[A-Za-z_]\w*)\s*:\s*(?<sem>[A-Za-z_]\w*)\s*;\s*$", RegexOptions.CultureInvariant);
 
     public static LegacyDx11GeometryInterfaceLinkResult Link(UnitySerializedPass pass, bool allowPadding = true)
+        => Link(pass, null, allowPadding);
+
+    public static LegacyDx11GeometryInterfaceLinkResult Link(UnitySerializedPass pass,
+        Func<string, UnitySerializedSubProgram, byte[]?>? resolveOriginalBinary, bool allowPadding = true)
     {
         ArgumentNullException.ThrowIfNull(pass);
         var result = new LegacyDx11GeometryInterfaceLinkResult();
@@ -76,9 +85,13 @@ public static class LegacyDx11GeometryInterfaceLinker
             if (slots.Count != 3 || slots.Any(x => x.Stage != "Vertex" && x.Stage != "Geometry" && x.Stage != "Fragment"))
                 throw new Unsupported("UNSUPPORTED_STAGE_TOPOLOGY: expected exactly Vertex/Geometry/Fragment");
             var vertices = pass.ProgVertex!.SubPrograms.Select(x => Parse(x, "Vertex")).ToList();
-            var geometries = pass.ProgGeometry!.SubPrograms.Select(x => Parse(x, "Geometry")).ToList();
+            var geometries = pass.ProgGeometry!.SubPrograms.Select(x => Parse(x, "Geometry", allowPadding,
+                resolveOriginalBinary?.Invoke("Geometry", x))).ToList();
             var pixels = pass.ProgFragment!.SubPrograms.Select(x => Parse(x, "Fragment")).ToList();
             ValidateVariants(vertices); ValidateVariants(geometries); ValidateVariants(pixels);
+            bool hasZeroEmission = geometries.Any(g => g.ZeroEmission is not null);
+            if (hasZeroEmission && (!SameVariantOrder(vertices, geometries) || !SameVariantOrder(geometries, pixels)))
+                throw new Unsupported("UNPROVEN_ZERO_EMISSION_VARIANT_ROUTING");
             var vg = Shared(vertices, geometries);
             var gp = Shared(geometries, pixels);
             var vp = Shared(vertices, pixels);
@@ -92,6 +105,7 @@ public static class LegacyDx11GeometryInterfaceLinker
             // consumed PS requires it with exactly the existing dtype/width.
             foreach (Model geometry in geometries)
             {
+                if (geometry.ZeroEmission is not null) continue;
                 var consumers = triples.Where(t => t.G == geometry).Select(t => t.P).Distinct().ToList();
                 foreach (Field output in geometry.Output.Fields.ToArray())
                 {
@@ -104,34 +118,39 @@ public static class LegacyDx11GeometryInterfaceLinker
                     }
                 }
             }
-            foreach (Model geometry in geometries)
+            foreach (var (vertex, geometry, _) in triples.Where(t => t.G.ZeroEmission is not null))
+                PlanZeroEmissionVertex(vertex, geometry.ZeroEmission!, resolveOriginalBinary?.Invoke("Vertex", vertex.Program), allowPadding);
+            foreach (Model geometry in geometries.Where(g => g.ZeroEmission is null))
                 PlanConsumer(geometry, geometry.Input, triples.Where(t => t.G == geometry).Select(t => t.V).Distinct().ToList(), false, allowPadding, result);
             foreach (Model pixel in pixels)
-                PlanConsumer(pixel, pixel.Input, triples.Where(t => t.P == pixel).Select(t => t.G).Distinct().ToList(), true, allowPadding, result);
+            {
+                var emitters = triples.Where(t => t.P == pixel && t.G.ZeroEmission is null).Select(t => t.G).Distinct().ToList();
+                if (emitters.Count > 0) PlanConsumer(pixel, pixel.Input, emitters, true, allowPadding, result);
+            }
             var all = vertices.Concat(geometries).Concat(pixels).ToList();
             var revised = new Dictionary<Model, string>();
             foreach (Model model in all)
             {
-                string source = model.Source;
-                foreach (var plan in model.Plans.OrderByDescending(x => x.Region.Start))
-                {
-                    string newline = source.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
-                    string body = newline + String.Join(newline, plan.Fields.Select(f => "    " + f.Declaration)) + newline;
-                    source = source.Remove(plan.Region.Start, plan.Region.Length).Insert(plan.Region.Start, body);
-                }
+                string source = model.ZeroEmission?.Source ?? model.Source;
+                string newline = source.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+                var structEdits = model.Plans.Select(plan => (Start: plan.Region.Start, Length: plan.Region.Length,
+                    Text: newline + String.Join(newline, plan.Fields.Select(f => "    " + f.Declaration)) + newline));
+                foreach (var edit in structEdits.Concat(model.EntryEdits).OrderByDescending(edit => edit.Start))
+                    source = source.Remove(edit.Start, edit.Length).Insert(edit.Start, edit.Text);
                 revised.Add(model, source);
             }
             // Commit only after every variant family and both edges passed.
             foreach (Model model in all)
             {
                 string source = revised[model];
-                var proof = new LegacyDx11GeometrySourceProof { Stage = model.Stage, BlobIndex = model.Program.BlobIndex, BeforeSha256 = Hash(model.Source), AfterSha256 = Hash(source) };
+                var proof = new LegacyDx11GeometrySourceProof { Stage = model.Stage, BlobIndex = model.Program.BlobIndex, BeforeSha256 = Hash(model.Source), AfterSha256 = Hash(source), ZeroEmissionFromDxbc = model.ZeroEmission is not null };
                 proof.PaddingSemantics.AddRange(model.Padding);
                 result.SourceProofs.Add(proof);
                 model.Program.SourceCode = source;
             }
             result.Success = true;
             result.Status = all.Any(m => revised[m] != m.Source) ? "SOURCE_INTERFACE_LINKED" : "EXACT_SOURCE_CHAIN_VALIDATED";
+            if (hasZeroEmission) result.Evidence = "DXBC_RETURN_ONLY_PROVEN; SOURCE_INTERFACE_ONLY; FXC_UNITY_NOT_RUN";
         }
         catch (Unsupported ex)
         {
@@ -143,6 +162,33 @@ public static class LegacyDx11GeometryInterfaceLinker
             result.SourceProofs.Clear();
         }
         return result;
+    }
+
+    private static bool SameVariantOrder(List<Model> left, List<Model> right)
+        => left.Count == right.Count && left.Zip(right, (a, b) => a.Keywords.SetEquals(b.Keywords)).All(equal => equal);
+
+    private static void PlanZeroEmissionVertex(Model vertex, LegacyDx11ZeroEmissionGeometry.Proof geometry, byte[]? binary, bool allowPadding)
+    {
+        var rawOutputs = binary is null ? null : LegacyDx11ZeroEmissionGeometry.ReadVertexOutputs(binary);
+        var required = geometry.Inputs.Where(input => !input.IsPrimitiveId).ToArray();
+        if (rawOutputs is null || rawOutputs.Count != required.Length || vertex.Output.Fields.Count != required.Length
+            || !rawOutputs.Zip(required, (output, input) => output.Matches(input)).All(equal => equal))
+            throw new Unsupported("UNPROVEN_ZERO_EMISSION_VERTEX_SIGNATURE");
+
+        bool SameDeclaration(Field field, LegacyDx11ZeroEmissionGeometry.Element element)
+            => field.Key == (field with { Semantic = element.SourceSemantic }).Key && field.Type == element.Type && field.Mode.Length == 0;
+        if (vertex.Output.Fields.Zip(rawOutputs, SameDeclaration).All(equal => equal)) return;
+        if (!allowPadding) throw new Unsupported("ZERO_EMISSION_VERTEX_REQUIRES_SIGNATURE_RESTORATION");
+
+        var desired = new List<Field>(rawOutputs.Count);
+        foreach (var output in rawOutputs)
+        {
+            var field = vertex.Output.Fields.SingleOrDefault(f => f.Key == (f with { Semantic = output.EmittedSemantic }).Key);
+            if (field is null || field.Type != output.Type || field.Mode.Length != 0)
+                throw new Unsupported("UNPROVEN_ZERO_EMISSION_VERTEX_OUTPUT_MAPPING");
+            desired.Add(field with { Semantic = output.SourceSemantic });
+        }
+        SetPlan(vertex, vertex.Output, desired);
     }
 
     private static void PlanConsumer(Model consumer, Interface input, List<Model> producers, bool rasterEdge, bool allowPadding, LegacyDx11GeometryInterfaceLinkResult result)
@@ -225,19 +271,26 @@ public static class LegacyDx11GeometryInterfaceLinker
         var set = first.SelectMany(x => x.Keywords).ToHashSet(); set.IntersectWith(second.SelectMany(x => x.Keywords)); return set;
     }
     private static bool Compatible(Model a, Model b, HashSet<ushort> shared) => shared.All(k => a.Keywords.Contains(k) == b.Keywords.Contains(k));
-    private static Model Parse(UnitySerializedSubProgram program, string stage)
+    private static Model Parse(UnitySerializedSubProgram program, string stage, bool allowPadding = false, byte[]? binary = null)
     {
         if (!program.Success || program.SourceLanguage != "hlsl" || String.IsNullOrWhiteSpace(program.SourceCode)) throw new Unsupported("MISSING_HLSL_SOURCE");
         if (program.KeywordIndices.Count != program.KeywordIndices.Distinct().Count()) throw new Unsupported("DUPLICATE_KEYWORD_INDEX");
-        var model = new Model { Program = program, Stage = stage, Source = program.SourceCode!, Mask = Mask(program.SourceCode!), Keywords = program.KeywordIndices.ToHashSet() };
+        var model = new Model { Program = program, Stage = stage, Source = program.SourceCode!, Keywords = program.KeywordIndices.ToHashSet() };
+        if (stage == "Geometry" && binary is not null && LegacyDx11ZeroEmissionGeometry.Restore(binary) is { } proof)
+        {
+            if (!allowPadding && model.Source != proof.Source)
+                throw new Unsupported("ZERO_EMISSION_GEOMETRY_REQUIRES_RESTORATION");
+            model.ZeroEmission = proof;
+            return model;
+        }
+        model.Mask = Mask(model.Source);
         model.Input = ParseInterface(model.Mask, "SPIRV_Cross_Input");
         model.Output = ParseInterface(model.Mask, "SPIRV_Cross_Output");
         ValidateInterfaceUses(model.Mask);
-        foreach (Field field in model.Input.Fields.Where(f => f.System)) ValidateSystem(field, stage, true);
         foreach (Field field in model.Output.Fields.Where(f => f.System)) ValidateSystem(field, stage, false);
         if (stage == "Geometry")
         {
-            const string entry = @"\[maxvertexcount\((?<max>\d+)\)\]\s*void\s+main\(\s*triangle\s+SPIRV_Cross_Input\s+stage_input\[3\]\s*,\s*inout\s+TriangleStream<SPIRV_Cross_Output>\s+geometry_stream\s*\)\s*\{";
+            const string entry = @"\[maxvertexcount\((?<max>\d+)\)\]\s*void\s+main\(\s*triangle\s+SPIRV_Cross_Input\s+stage_input\[3\]\s*,\s*inout\s+TriangleStream<SPIRV_Cross_Output>\s+(?<stream>geometry_stream)(?<primitive>\s*,\s*uint\s+" + PrimitiveIdParameter + @"\s*:\s*" + PrimitiveIdSemantic + @")?\s*\)\s*\{";
             var matches = Regex.Matches(model.Mask, entry);
             if (matches.Count != 1 || !Int32.TryParse(matches[0].Groups["max"].Value, out int max) || max < 1 || max > 1024)
                 throw new Unsupported("UNSUPPORTED_GEOMETRY_ENTRY: expected one triangle[3]/TriangleStream/maxvertexcount");
@@ -246,11 +299,42 @@ public static class LegacyDx11GeometryInterfaceLinker
             if (Regex.Matches(model.Mask, @"\bTriangleStream\s*<\s*(?<type>[A-Za-z_]\w*)\s*>").Cast<Match>().Any(m => m.Groups["type"].Value != "SPIRV_Cross_Output")
                 || Regex.IsMatch(model.Mask, @"\b(?:PointStream|LineStream)\s*<|\[\s*instance\s*\("))
                 throw new Unsupported("UNSUPPORTED_GEOMETRY_STREAM_TOPOLOGY");
+            PlanPrimitiveIdInput(model, matches[0], allowPadding);
         }
         else if (Regex.Matches(model.Mask, @"\bSPIRV_Cross_Output\s+main\(\s*SPIRV_Cross_Input\s+stage_input\s*\)\s*\{").Count != 1)
             throw new Unsupported("UNSUPPORTED_ENTRY_SHAPE: " + stage);
+        foreach (Field field in Fields(model, model.Input).Where(f => f.System)) ValidateSystem(field, stage, true);
         return model;
     }
+
+    private static void PlanPrimitiveIdInput(Model model, Match entry, bool allowPadding)
+    {
+        Field? field = model.Input.Fields.SingleOrDefault(f => f.Semantic.Equals(PrimitiveIdSemantic, StringComparison.OrdinalIgnoreCase));
+        if (field is null) return;
+        if (entry.Groups["primitive"].Success || field.Type != "uint" || field.Mode.Length != 0)
+            throw new Unsupported("UNSUPPORTED_GEOMETRY_PRIMITIVE_ID_INPUT");
+        if (!allowPadding)
+            throw new Unsupported("PRIMITIVE_ID_REQUIRES_STANDALONE_INPUT");
+
+        string name = Regex.Escape(field.Name);
+        var declarations = Regex.Matches(model.Mask[..model.Input.Start], @"(?m)^[ \t]*static[ \t]+uint[ \t]+" + name + @"[ \t]*;");
+        var assignment = new Regex(@"\G\s*" + name + @"\s*=\s*(?<value>stage_input\s*\.\s*" + name + @")\s*;")
+            .Match(model.Mask, entry.Index + entry.Length);
+        if (declarations.Count != 1 || !assignment.Success || Regex.Matches(model.Mask, @"\.\s*" + name + @"\b").Count != 1
+            || Regex.IsMatch(model.Mask, @"\b" + PrimitiveIdParameter + @"\b"))
+            throw new Unsupported("UNSUPPORTED_GEOMETRY_PRIMITIVE_ID_GLUE");
+        string beforeDeclaration = model.Mask[..declarations[0].Index];
+        if (beforeDeclaration.Count(c => c == '{') != beforeDeclaration.Count(c => c == '}'))
+            throw new Unsupported("UNSUPPORTED_GEOMETRY_PRIMITIVE_ID_GLUE");
+
+        // DX11 delivers this per-primitive value separately from the VS vertex array.
+        SetPlan(model, model.Input, model.Input.Fields.Where(f => f != field).ToList());
+        Group stream = entry.Groups["stream"];
+        Group value = assignment.Groups["value"];
+        model.EntryEdits.Add((stream.Index + stream.Length, 0, ", uint " + PrimitiveIdParameter + " : " + PrimitiveIdSemantic));
+        model.EntryEdits.Add((value.Index, value.Length, PrimitiveIdParameter));
+    }
+
     private static void ValidateSystem(Field field, string stage, bool input)
     {
         string semantic = Regex.Replace(field.Semantic.ToUpperInvariant(), @"\d+$", "");

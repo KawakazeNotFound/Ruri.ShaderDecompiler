@@ -12,11 +12,14 @@ internal static class LegacyDx11MatrixRegisterLowering
 
     public static byte[] Apply(byte[] before, byte[] structured)
     {
-        SpirvModule previous = SpirvModule.Parse(before), module = SpirvModule.Parse(structured);
-        var oldStructs = previous.Instructions.Where(i => i.OpCode == 30).Select(i => i[1]).ToHashSet();
-        var generated = module.Instructions.Where(i => i.OpCode == 72 && i.WordCount == 4
-            && i[3] == 4 && !oldStructs.Contains(i[1])).Select(i => (i[1], i[2])).ToHashSet();
-        if (generated.Count == 0) return structured;
+        var generated = FindGeneratedMatrices(SpirvModule.ReadWords(before), SpirvModule.ReadWords(structured));
+        if (generated is null || generated.Count == 0) return structured;
+        return Rewrite(structured, generated);
+    }
+
+    private static byte[] Rewrite(byte[] structured, HashSet<(uint Struct, uint Member)> generated)
+    {
+        var module = SpirvModule.Parse(structured);
         var definitions = new Dictionary<uint, SpirvInstruction>();
         foreach (SpirvInstruction i in module.Instructions)
         {
@@ -161,5 +164,32 @@ internal static class LegacyDx11MatrixRegisterLowering
                 if (i.OpCode == 5 && i.WordCount >= 2 && i[1] == id) i.MakeNop();
         }
         return module.ToBytes();
+    }
+
+    private static HashSet<(uint Struct, uint Member)>? FindGeneratedMatrices(ReadOnlySpan<uint> before, ReadOnlySpan<uint> structured)
+    {
+        HashSet<(uint Struct, uint Member)>? rowMajor = null;
+        var rewritten = new SpirvModule.InstructionReader(structured);
+        while (rewritten.MoveNext())
+        {
+            var instruction = rewritten.Current;
+            if (rewritten.OpCode == SpvOpCode.OpMemberDecorate && instruction.Length == 4 && instruction[3] == Decoration.RowMajor)
+            {
+                (rowMajor ??= new()).Add((instruction[1], instruction[2]));
+            }
+        }
+        if (rowMajor is not null) RemoveExistingStructs(before, rowMajor);
+        return rowMajor;
+    }
+
+    private static void RemoveExistingStructs(ReadOnlySpan<uint> before, HashSet<(uint Struct, uint Member)> rowMajor)
+    {
+        var oldStructs = new HashSet<uint>();
+        var original = new SpirvModule.InstructionReader(before);
+        while (original.MoveNext())
+        {
+            if (original.OpCode == SpvOpCode.OpTypeStruct) oldStructs.Add(original.Current[1]);
+        }
+        rowMajor.RemoveWhere(member => oldStructs.Contains(member.Struct));
     }
 }

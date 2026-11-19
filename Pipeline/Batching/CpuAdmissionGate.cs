@@ -3,8 +3,8 @@ using System.Runtime.InteropServices;
 namespace Ruri.ShaderTools.Pipeline.Batching;
 
 /// <summary>
-/// Decides how many decompiles may run concurrently, and grows that allowance
-/// while the machine has headroom.
+/// Admits CPU work while the machine has headroom. When the runtime reports high
+/// memory load, already-running jobs drain and new jobs run one at a time.
 ///
 /// Concurrency is ADMISSION-GATED rather than fixed. A batch starts at one worker
 /// and the monitor raises the ceiling each time it samples system CPU below the
@@ -15,8 +15,8 @@ namespace Ruri.ShaderTools.Pipeline.Batching;
 /// Starting at one and climbing (rather than starting wide and hoping) is what
 /// keeps a bulk decompile from monopolising a machine someone is using.
 ///
-/// CPU sampling is Windows-specific. Elsewhere the gate simply opens to its
-/// ceiling: callers still get full parallelism, just without throttling.
+/// CPU sampling is Windows-specific. The runtime's memory signal is used even
+/// on platforms without a CPU sampler.
 /// </summary>
 internal sealed class CpuAdmissionGate : IDisposable
 {
@@ -31,6 +31,7 @@ internal sealed class CpuAdmissionGate : IDisposable
 
     private int _allowed;
     private int _inFlight;
+    private bool _highMemoryLoad;
 
     public CpuAdmissionGate(int ceiling, int cpuCapPercent, CancellationToken cancellationToken)
     {
@@ -42,6 +43,7 @@ internal sealed class CpuAdmissionGate : IDisposable
         // and reached the cores only after seconds. The monitor still grants beyond the share
         // while the machine sits idle, and never takes a running job back.
         _allowed = Math.Clamp(_ceiling * _cpuCapPercent / 100, 1, _ceiling);
+        _highMemoryLoad = IsHighMemoryLoad();
 
         _monitorCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _monitor = Task.Run(() => MonitorLoop(_monitorCts.Token));
@@ -58,15 +60,16 @@ internal sealed class CpuAdmissionGate : IDisposable
     {
         lock (_lock)
         {
-            while (_inFlight >= _allowed)
+            while (_inFlight >= (_highMemoryLoad ? 1 : _allowed))
             {
-                Monitor.Wait(_lock, 250);
                 if (cancellationToken.IsCancellationRequested)
                 {
                     return false;
                 }
+                Monitor.Wait(_lock, 250);
             }
 
+            if (cancellationToken.IsCancellationRequested) return false;
             _inFlight++;
             return true;
         }
@@ -105,14 +108,31 @@ internal sealed class CpuAdmissionGate : IDisposable
         }
     }
 
+    private static bool IsHighMemoryLoad()
+    {
+        var memory = GC.GetGCMemoryInfo();
+        return memory.HighMemoryLoadThresholdBytes > 0 && memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes;
+    }
+
+    private void RefreshMemoryPressure()
+    {
+        bool highMemoryLoad = IsHighMemoryLoad();
+        lock (_lock)
+        {
+            if (highMemoryLoad == _highMemoryLoad) return;
+            _highMemoryLoad = highMemoryLoad;
+            Monitor.PulseAll(_lock);
+        }
+    }
+
     private void MonitorLoop(CancellationToken cancellationToken)
     {
         // Without a baseline the first sample reads as 100% busy and the gate
         // would never open.
-        if (!TrySampleCpuTimes(out long previousIdle, out long previousKernel, out long previousUser))
+        bool sampleCpu = TrySampleCpuTimes(out long previousIdle, out long previousKernel, out long previousUser);
+        if (!sampleCpu)
         {
             OpenFully();
-            return;
         }
 
         // Wait on the token's handle rather than Task.Delay(...).Wait(): the
@@ -129,7 +149,8 @@ internal sealed class CpuAdmissionGate : IDisposable
                 return;
             }
 
-            if (!TrySampleCpuTimes(out long idle, out long kernel, out long user))
+            RefreshMemoryPressure();
+            if (!sampleCpu || !TrySampleCpuTimes(out long idle, out long kernel, out long user))
             {
                 continue;
             }

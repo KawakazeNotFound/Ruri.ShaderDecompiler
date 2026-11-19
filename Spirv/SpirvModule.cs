@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Ruri.ShaderTools.Spirv;
 
@@ -69,47 +70,70 @@ public sealed class SpirvModule
 
     private SpirvModule() { }
 
+    internal ref struct InstructionReader
+    {
+        private readonly ReadOnlySpan<uint> _words;
+        private int _next;
+
+        public InstructionReader(ReadOnlySpan<uint> words)
+        {
+            _words = words;
+            _next = HeaderWordCount;
+        }
+
+        public int Offset { get; private set; }
+        public ReadOnlySpan<uint> Current { get; private set; }
+        public ushort OpCode => SpvOpCode.GetOpCode(Current[0]);
+        public bool AtEnd => _next == _words.Length;
+
+        public bool MoveNext()
+        {
+            if (_next >= _words.Length) return false;
+            int length = SpvOpCode.GetWordCount(_words[_next]);
+            if (length == 0 || length > _words.Length - _next) return false;
+            Offset = _next;
+            Current = _words.Slice(Offset, length);
+            _next += length;
+            return true;
+        }
+
+        public bool ReadToEnd()
+        {
+            while (MoveNext()) { }
+            return AtEnd;
+        }
+    }
+
     // ---- parse / serialize -------------------------------------------------
 
     public static SpirvModule Parse(byte[] bytes) => Parse((ReadOnlySpan<byte>)bytes);
 
+    internal static ReadOnlySpan<uint> ReadWords(ReadOnlySpan<byte> bytes)
+    {
+        var words = MemoryMarshal.Cast<byte, uint>(bytes);
+        if (words.Length < HeaderWordCount || words[0] != MagicNumber)
+        {
+            throw new ArgumentException("Invalid SPIR-V binary.");
+        }
+        return words;
+    }
+
     public static SpirvModule Parse(ReadOnlySpan<byte> bytes)
     {
-        int wordCount = bytes.Length / 4;
-        if (wordCount < HeaderWordCount)
-        {
-            throw new ArgumentException("Invalid SPIR-V binary.");
-        }
-
-        uint[] words = new uint[wordCount];
-        bytes[..(wordCount * 4)].CopyTo(System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan()));
-
-        if (words[0] != MagicNumber)
-        {
-            throw new ArgumentException("Invalid SPIR-V binary.");
-        }
-
+        uint[] words = ReadWords(bytes).ToArray();
         var module = new SpirvModule();
         module._chunks.Add(words);
         module._tailChunk = 0;
         module._tailUsed = words.Length;   // chunk 0 is fully occupied by the parse
         module.Header = words.AsSpan(0, HeaderWordCount).ToArray();
 
-        int offset = HeaderWordCount;
-        while (offset < words.Length)
+        var reader = new InstructionReader(words);
+        while (reader.MoveNext())
         {
-            uint word0 = words[offset];
-            ushort opCode = SpvOpCode.GetOpCode(word0);
-            ushort length = SpvOpCode.GetWordCount(word0);
-            if (length == 0 || offset + length > words.Length)
-            {
-                break;
-            }
-
-            var instruction = new SpirvInstruction(module, opCode, chunk: 0, start: offset, length: length, offset: offset);
+            var instruction = new SpirvInstruction(module, reader.OpCode, chunk: 0,
+                start: reader.Offset, length: reader.Current.Length, offset: reader.Offset);
             module.Instructions.Add(instruction);
             module.ObserveResultId(instruction);
-            offset += length;
         }
 
         return module;

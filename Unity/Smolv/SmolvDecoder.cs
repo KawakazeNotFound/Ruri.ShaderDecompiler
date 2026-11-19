@@ -14,6 +14,7 @@
 // Arknights Endfield 1.4.4) emulated over the game's real modules produces byte-identical output.
 
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 
 namespace Ruri.ShaderTools.Unity.Smolv;
@@ -50,22 +51,15 @@ public static class SmolvDecoder
 		return size;
 	}
 
-	public static byte[]? Decode(byte[] data)
+	public static byte[]? Decode(byte[] data) => Decode(data, 0, data.Length);
+
+	internal static byte[]? Decode(byte[] data, int offset, int length)
 	{
-		int bufferSize = GetDecodedBufferSize(data);
-		if (bufferSize == 0)
-		{
-			// invalid SMOL-V
-			return null;
-		}
-
-		byte[] output = new byte[bufferSize];
-		if (Decode(data, output))
-		{
-			return output;
-		}
-
-		return null;
+		if (GetDecodedBufferSize(data.AsSpan(offset, length)) <= 0) return null;
+		using var input = new MemoryStream(data, offset, length, writable: false);
+		// Reserve from actual decoder output, not an unchecked length in the header.
+		using var output = new MemoryStream();
+		return Decode(input, length, output) ? output.ToArray() : null;
 	}
 
 	public static bool Decode(byte[] data, [NotNull] byte[] output)
@@ -73,7 +67,7 @@ public static class SmolvDecoder
 		ArgumentNullException.ThrowIfNull(output);
 
 		int bufferSize = GetDecodedBufferSize(data);
-		if (bufferSize > output.Length)
+		if (bufferSize <= 0 || bufferSize > output.Length)
 		{
 			return false;
 		}

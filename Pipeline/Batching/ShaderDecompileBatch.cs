@@ -34,6 +34,7 @@ internal static class ShaderDecompileBatch
         int cpuUsageCapPercent,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         // Decompiling is compute from end to end; a worker per core is the whole machine, and two
         // per core only made them take turns.
         int workerCount = maxConcurrency > 0 ? maxConcurrency : Math.Max(1, Environment.ProcessorCount);
@@ -49,8 +50,9 @@ internal static class ShaderDecompileBatch
         }
 
         ExceptionDispatchInfo? feedFailure = Feed(requests, queue, halt);
-        Task.WaitAll(workers, cancellationToken);
+        Task.WhenAll(workers).GetAwaiter().GetResult();
         feedFailure?.Throw();
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     /// <summary>
@@ -93,10 +95,9 @@ internal static class ShaderDecompileBatch
         Action<int, DecompileResult> onResult,
         CancellationTokenSource halt)
     {
-        using var decompiler = new ShaderDecompiler();
-
         try
         {
+            using var decompiler = new ShaderDecompiler();
             foreach ((int index, byte[] binary, DecompileOptions options) in queue.GetConsumingEnumerable(halt.Token))
             {
                 if (!gate.Acquire(halt.Token))
@@ -109,7 +110,7 @@ internal static class ShaderDecompileBatch
                 {
                     result = decompiler.Decompile(binary, options);
                 }
-                catch (Exception exception)
+                catch (Exception exception) when (exception is not OutOfMemoryException)
                 {
                     // A worker must never take the batch down with it — one broken
                     // shader out of thousands is a result, not a crash.
@@ -125,7 +126,7 @@ internal static class ShaderDecompileBatch
                     gate.Release();
                 }
 
-                onResult(index, result);
+                if (!halt.IsCancellationRequested) onResult(index, result);
             }
         }
         catch (OperationCanceledException) when (halt.IsCancellationRequested)

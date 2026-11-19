@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using Ruri.ShaderTools.Unity.ShaderLab;
 
 namespace Ruri.ShaderTools;
 
@@ -17,6 +18,9 @@ public sealed class LegacyDx11InterfaceLinkResult
     public int AddedPaddingFields { get; internal set; }
     public int WidenedFields { get; internal set; }
     public int CompatiblePairs { get; internal set; }
+    public int PreservedUnpairedPrograms { get; internal set; }
+    public bool RequiresPairedCompilation { get; internal set; }
+    public int VariantFamilies { get; internal set; }
     public List<LegacyDx11DeadOutputProof> PrunedOutputs { get; } = new();
     public List<LegacyDx11FlatOutputProof> PropagatedFlatOutputs { get; } = new();
     public LegacyDx11GeometryInterfaceLinkResult? GeometryChain { get; internal set; }
@@ -92,6 +96,15 @@ public static class LegacyDx11InterfaceLinker
     private static readonly Regex ConsumptionSwizzle = new(@"\G\s*\.\s*([xyzw]{1,4}|[rgba]{1,4})(?![A-Za-z_0-9])", RegexOptions.CultureInvariant);
 
     public static LegacyDx11InterfaceLinkResult Link(UnitySerializedPass pass)
+        => Link(pass, null);
+
+    public static LegacyDx11InterfaceLinkResult Link(UnitySerializedPass pass,
+        Func<string, UnitySerializedSubProgram, byte[]?>? resolveOriginalBinary)
+        => Link(pass, resolveOriginalBinary, null);
+
+    public static LegacyDx11InterfaceLinkResult Link(UnitySerializedPass pass,
+        Func<string, UnitySerializedSubProgram, byte[]?>? resolveOriginalBinary, List<string>? keywordNames,
+        Func<bool>? verifyCompleteSource = null)
     {
         ArgumentNullException.ThrowIfNull(pass);
         var result = new LegacyDx11InterfaceLinkResult();
@@ -108,7 +121,7 @@ public static class LegacyDx11InterfaceLinker
             {
                 // A geometry pass has two distinct interface edges. Never treat
                 // its vertex output as if it fed the fragment shader directly.
-                var geometry = LegacyDx11GeometryInterfaceLinker.Link(pass);
+                var geometry = LegacyDx11GeometryInterfaceLinker.Link(pass, resolveOriginalBinary);
                 result.GeometryChain = geometry;
                 result.Success = geometry.Success;
                 result.Status = geometry.Status;
@@ -137,10 +150,17 @@ public static class LegacyDx11InterfaceLinker
             var sharedKeywords = vertices.SelectMany(model => model.Keywords).ToHashSet();
             sharedKeywords.IntersectWith(pixels.SelectMany(model => model.Keywords));
             bool Compatible(Model vertex, Model pixel) => sharedKeywords.All(keyword => vertex.Keywords.Contains(keyword) == pixel.Keywords.Contains(keyword));
-            var consumers = vertices.ToDictionary(vertex => vertex, vertex => pixels.Where(pixel => Compatible(vertex, pixel)).ToList());
-            if (consumers.Any(pair => pair.Value.Count == 0) || pixels.Any(pixel => !vertices.Any(vertex => Compatible(vertex, pixel))))
+            var consumers = vertices.Select(vertex => (Vertex: vertex, Pixels: pixels.Where(pixel => Compatible(vertex, pixel)).ToList()))
+                .Where(pair => pair.Pixels.Count > 0).ToList();
+            var pairedPixels = consumers.SelectMany(pair => pair.Pixels).ToHashSet();
+            int unpaired = vertices.Count - consumers.Count + pixels.Count - pairedPixels.Count;
+            var completeSource = new Lazy<bool>(() => keywordNames is not null
+                && LegacyDx11VariantRouting.CanCatalogStage(pass.ProgVertex!, keywordNames)
+                && LegacyDx11VariantRouting.CanCatalogStage(pass.ProgFragment!, keywordNames)
+                && verifyCompleteSource?.Invoke() == true);
+            if (consumers.Count == 0 || (unpaired > 0 && !completeSource.Value))
                 throw new Unsupported("UNPAIRED_VARIANT: no exact shared-keyword projection partner");
-            result.CompatiblePairs = consumers.Sum(pair => pair.Value.Count);
+            result.CompatiblePairs = consumers.Sum(pair => pair.Pixels.Count);
             var proofs = new List<LegacyDx11DeadOutputProof>();
             var flatProofs = new List<LegacyDx11FlatOutputProof>();
             foreach (var (vertex, compatiblePixels) in consumers)
@@ -168,30 +188,46 @@ public static class LegacyDx11InterfaceLinker
                 foreach (Model pixel in compatiblePixels)
                     ValidatePair(vertex, pixel);
             }
-            // Type/qualifier conflicts which remain after proven dead-output pruning
-            // need a variant-family linker, not a guessed coercion or first winner.
-            var union = new Dictionary<string, Field>(StringComparer.OrdinalIgnoreCase);
-            foreach (Model model in vertices.Concat(pixels))
+            var models = consumers.Select(pair => pair.Vertex).Concat(pixels.Where(pairedPixels.Contains)).ToList();
+            var ordered = BuildLayout(models, out string? conflict);
+            var updates = new List<(Model Model, string Source)>();
+            int padding = 0, widening = 0, familyCount = 0;
+            bool pairedCompilation = unpaired > 0;
+            if (ordered is not null)
             {
-                foreach (Field field in model.Fields.Where(field => !field.System && !model.Pruned.Contains(field.Key)))
+                foreach (Model model in models)
+                    updates.Add((model, Rewrite(model, ordered, ref padding, ref widening)));
+            }
+            else
+            {
+                Func<Model, string> familyKey;
+                var families = unpaired == 0 && keywordNames is not null
+                    ? LegacyDx11VariantRouting.ProveVariantFamilies(keywordNames, pass) : null;
+                if (families is not null)
                 {
-                    if (!union.TryGetValue(field.Key, out Field? existing))
-                        union.Add(field.Key, field);
-                    else
-                    {
-                        if (existing.BaseType != field.BaseType || existing.Mode != field.Mode)
-                            throw new Unsupported("PASS_UNION_CONFLICT: semantic " + field.Semantic + " has incompatible scalar type or interpolation");
-                        if (field.Width > existing.Width)
-                            union[field.Key] = existing with { Width = field.Width };
-                    }
+                    familyKey = model => families[model.Program];
+                }
+                else if (completeSource.Value)
+                {
+                    // The build filter admits only candidates with both original stages.
+                    // Thus each surviving assignment takes its exact keyword branch.
+                    familyKey = model => string.Join(",", model.Keywords.Where(sharedKeywords.Contains).Order());
+                    pairedCompilation = true;
+                }
+                else
+                {
+                    throw new Unsupported(keywordNames is null ? conflict! : conflict + "; shared keyword routing is not proven");
+                }
+                foreach (var family in models.GroupBy(familyKey))
+                {
+                    var layout = BuildLayout(family, out string? familyConflict);
+                    if (layout is null)
+                        throw new Unsupported(familyConflict + "; conflict remains in a proven keyword family");
+                    foreach (Model model in family)
+                        updates.Add((model, Rewrite(model, layout, ref padding, ref widening)));
+                    familyCount++;
                 }
             }
-            var ordered = union.Values.OrderBy(field => SemanticStem(field.Semantic), StringComparer.OrdinalIgnoreCase)
-                .ThenBy(field => SemanticIndex(field.Semantic)).ToList();
-            var updates = new List<(Model Model, string Source)>();
-            int padding = 0, widening = 0;
-            foreach (Model model in vertices.Concat(pixels))
-                updates.Add((model, Rewrite(model, ordered, ref padding, ref widening)));
             // No metadata is mutated before every program passed all checks.
             foreach (var update in updates)
             {
@@ -202,7 +238,10 @@ public static class LegacyDx11InterfaceLinker
                 }
             }
             result.Success = true;
-            result.Status = "SOURCE_LINKED_NOT_COMPILED";
+            result.PreservedUnpairedPrograms = unpaired;
+            result.RequiresPairedCompilation = pairedCompilation;
+            result.Status = familyCount == 0 ? "SOURCE_LINKED_NOT_COMPILED" : "VARIANT_FAMILIES_LINKED_NOT_COMPILED";
+            result.VariantFamilies = familyCount;
             result.AddedPaddingFields = padding;
             result.WidenedFields = widening;
             result.PrunedOutputs.AddRange(proofs);
@@ -214,6 +253,30 @@ public static class LegacyDx11InterfaceLinker
             result.Diagnostic = exception.Message;
         }
         return result;
+    }
+
+    private static List<Field>? BuildLayout(IEnumerable<Model> models, out string? conflict)
+    {
+        conflict = null;
+        var union = new Dictionary<string, Field>(StringComparer.OrdinalIgnoreCase);
+        foreach (Model model in models)
+        foreach (Field field in model.Fields.Where(field => !field.System && !model.Pruned.Contains(field.Key)))
+        {
+            if (!union.TryGetValue(field.Key, out Field? existing))
+                union.Add(field.Key, field);
+            else
+            {
+                if (existing.BaseType != field.BaseType || existing.Mode != field.Mode)
+                {
+                    conflict = "PASS_UNION_CONFLICT: semantic " + field.Semantic + " has incompatible scalar type or interpolation";
+                    return null;
+                }
+                if (field.Width > existing.Width)
+                    union[field.Key] = existing with { Width = field.Width };
+            }
+        }
+        return union.Values.OrderBy(field => SemanticStem(field.Semantic), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(field => SemanticIndex(field.Semantic)).ToList();
     }
 
     private static void PropagateProvenFlatOutputs(Model vertex, List<Model> pixels, List<LegacyDx11FlatOutputProof> proofs)

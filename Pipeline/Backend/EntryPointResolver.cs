@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Ruri.ShaderTools.Spirv;
 
 namespace Ruri.ShaderTools.Pipeline.Backend;
@@ -17,19 +18,23 @@ internal static class EntryPointResolver
 {
     public static EntryPointSelection Resolve(byte[] spirv, string? preferredName)
     {
-        SpirvModule module = SpirvModule.Parse(spirv);
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(spirv.AsSpan());
+        if (words.Length < SpirvModule.HeaderWordCount || words[0] != SpirvModule.MagicNumber)
+            throw new ArgumentException("Invalid SPIR-V binary.", nameof(spirv));
         EntryPointSelection? first = null;
 
-        foreach (SpirvInstruction instruction in module.Instructions)
+        var reader = new SpirvModule.InstructionReader(words);
+        while (reader.MoveNext())
         {
-            if (instruction.OpCode != SpvOpCode.OpEntryPoint || instruction.WordCount < 3)
+            var instruction = reader.Current;
+            if (reader.OpCode != SpvOpCode.OpEntryPoint || instruction.Length < 3)
             {
                 continue;
             }
 
             // OpEntryPoint: [header, execution-model, function-id, name…, interface-ids…]
             uint executionModel = instruction[1];
-            string name = SpirvLiteral.ReadString(instruction.Words, 3);
+            string name = SpirvLiteral.ReadString(instruction, 3);
             var candidate = new EntryPointSelection(ShaderStageClassifier.FromExecutionModel(executionModel), name, executionModel);
 
             first ??= candidate;

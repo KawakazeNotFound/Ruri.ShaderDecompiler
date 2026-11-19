@@ -29,17 +29,6 @@ namespace Ruri.ShaderTools.Pipeline;
 /// </summary>
 internal sealed class DecompilePipeline
 {
-    /// <summary>
-    /// Shader model floor for the source backend.
-    ///
-    /// The backend uses this value to gate WHICH INTRINSICS IT IS WILLING TO
-    /// EMIT — never to validate input. Every gate is "emitting X requires SM ≥ N",
-    /// so raising it can only unlock: wave ops, non-float texture sampling, mesh
-    /// and variable-rate emission all fire on inputs compiled for older models.
-    /// A caller asking for a HIGHER model keeps it — the floor only raises.
-    /// </summary>
-    private const uint MinimumEmitShaderModel = 67;
-
     private readonly ConstantBufferStructurer _structurer = new();
     private readonly SpirvCrossDriver _driver = new();
     private readonly SpirvFrontend _frontend = new();
@@ -52,6 +41,8 @@ internal sealed class DecompilePipeline
 
         var result = new DecompileResult { FinalSymbols = symbols, FinalUnityMetadata = options.UnityMetadata };
         DecompileStage stage = DecompileStage.FrontendConversion;
+        bool captureStages = options.KeepIntermediates || !string.IsNullOrWhiteSpace(options.DebugDumpDirectory);
+        byte[]? deepestModule = null;
 
         try
         {
@@ -64,12 +55,14 @@ internal sealed class DecompilePipeline
 
             stage = DecompileStage.InterstageSlotAssignment;
             spirv = InterstageSlotAssigner.Assign(spirv);
-            result.SpirvAfterFrontend = spirv;
+            deepestModule = spirv;
+            if (captureStages) result.SpirvAfterFrontend = spirv;
 
             stage = DecompileStage.ConstantBufferStructuring;
             byte[] structured = Structure(spirv, symbols);
             if (shaderModel == 50) structured = LegacyDx11MatrixRegisterLowering.Apply(spirv, structured);
-            result.SpirvAfterStructuring = structured;
+            deepestModule = structured;
+            if (captureStages) result.SpirvAfterStructuring = structured;
 
             stage = DecompileStage.SymbolBinding;
             List<BoundMemberName> bound = Bind(options, structured, symbols);
@@ -77,7 +70,8 @@ internal sealed class DecompilePipeline
             stage = DecompileStage.SymbolInjection;
             (byte[] injected, List<FlattenedBlock> flattened) = Inject(structured, symbols, bound);
             if (shaderModel == 50) injected = LegacyDx11UnityIdentifierNaming.Apply(injected);
-            result.SpirvAfterSymbolInjection = injected;
+            deepestModule = injected;
+            if (captureStages) result.SpirvAfterSymbolInjection = injected;
 
             stage = DecompileStage.SourceEmission;
             EntryPointSelection entry = EntryPointResolver.Resolve(injected, symbols.EntryPoint);
@@ -91,13 +85,16 @@ internal sealed class DecompilePipeline
             result.SourceLanguage = language == EmitLanguage.Glsl ? "glsl" : "hlsl";
             result.SourceFileExtension = language == EmitLanguage.Glsl ? ".glsl" : ".hlsl";
             result.Stage = entry.Stage;
-            result.FinalSpirv = injected;
-            result.StructuringLog = _structurer.LastRewriteSummary;
+            if (options.KeepIntermediates)
+            {
+                result.FinalSpirv = injected;
+                result.StructuringLog = _structurer.LastRewriteSummary;
+            }
             return Handed(result, options);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
-            return Handed(Fail(result, stage, exception, binary, options, symbols), options);
+            return Handed(Fail(result, stage, exception, binary, options, symbols, deepestModule), options);
         }
     }
 
@@ -132,7 +129,7 @@ internal sealed class DecompilePipeline
         {
             return _structurer.Rewrite(spirv, symbols);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             throw new InvalidOperationException(
                 $"Constant buffer structuring failed.{Environment.NewLine}{ModuleReports.DescribeBuiltInDecorations(spirv)}",
@@ -155,7 +152,7 @@ internal sealed class DecompilePipeline
             {
                 binder.Bind(layout, symbols, bound);
             }
-            catch (Exception exception)
+            catch (Exception exception) when (exception is not OutOfMemoryException)
             {
                 throw new InvalidOperationException($"{binder.GetType().Name} failed: {exception.Message}", exception);
             }
@@ -186,7 +183,7 @@ internal sealed class DecompilePipeline
             AppendBound(members, bound);
             return (DebugNameInjector.Inject(spirv, names, members), flattened);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             throw new InvalidOperationException(
                 $"Symbol injection failed.{Environment.NewLine}" +
@@ -363,12 +360,13 @@ internal sealed class DecompilePipeline
         Exception exception,
         byte[] binary,
         DecompileOptions options,
-        SerializedProgramData symbols)
+        SerializedProgramData symbols,
+        byte[]? deepestModule)
     {
         result.Success = false;
         result.ErrorMessage = exception.ToString();
         result.FailedStage = stage;
-        result.FinalSpirv = result.SpirvAfterSymbolInjection ?? result.SpirvAfterStructuring ?? result.SpirvAfterFrontend;
+        result.FinalSpirv = deepestModule;
         result.StructuringLog = _structurer.LastRewriteSummary;
         result.NativeToolDiagnostics = _frontend.LastFailure ?? _driver.LastFailure;
 
@@ -388,7 +386,7 @@ internal sealed class DecompilePipeline
                 result.DebugDumpDirectory = FailureDumpWriter.Write(
                     options.DebugDumpDirectory!, options.DebugDumpStem, binary, result, symbols);
             }
-            catch (Exception dumpException)
+            catch (Exception dumpException) when (dumpException is not OutOfMemoryException)
             {
                 Console.Error.WriteLine($"[ShaderDecompiler] Failed to write failure dump: {dumpException.Message}");
             }

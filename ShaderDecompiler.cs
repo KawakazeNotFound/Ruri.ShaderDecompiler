@@ -85,6 +85,7 @@ public sealed class ShaderDecompiler : IDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(requests);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (requests.Count == 0)
         {
@@ -98,7 +99,9 @@ public sealed class ShaderDecompiler : IDisposable
         {
             (byte[] binary, DecompileOptions options) = requests[0];
             results[0] = Decompile(binary, options);
+            cancellationToken.ThrowIfCancellationRequested();
             onProgress?.Invoke(0, results[0]);
+            cancellationToken.ThrowIfCancellationRequested();
             return results;
         }
 

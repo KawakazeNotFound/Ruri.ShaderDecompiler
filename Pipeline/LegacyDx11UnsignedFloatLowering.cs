@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Ruri.ShaderTools.Spirv;
 using Ruri.ShaderTools.Spirv.Analysis;
 
@@ -10,16 +11,12 @@ internal static class LegacyDx11UnsignedFloatLowering
     public static byte[] Apply(byte[] bytes)
     {
         // SpirvModule.Parse stops at malformed tails; do not normalize such input.
-        if (bytes.Length < 20 || bytes.Length % 4 != 0)
+        var words = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan());
+        if (words.Length < SpirvModule.HeaderWordCount || bytes.Length % sizeof(uint) != 0)
             throw new ArgumentException("Malformed SPIR-V byte length.");
-        int cursor = 20;
-        while (cursor < bytes.Length)
-        {
-            int size = (int)(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(cursor)) >> 16) * 4;
-            if (size < 4 || size > bytes.Length - cursor)
-                throw new ArgumentException("Malformed SPIR-V instruction length.");
-            cursor += size;
-        }
+        var reader = new SpirvModule.InstructionReader(words);
+        if (!reader.ReadToEnd())
+            throw new ArgumentException("Malformed SPIR-V instruction length.");
         SpirvModule module = SpirvModule.Parse(bytes);
         var definitions = new Dictionary<uint, SpirvInstruction>();
         foreach (SpirvInstruction instruction in module.Instructions)

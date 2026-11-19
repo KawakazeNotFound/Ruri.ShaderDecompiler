@@ -73,36 +73,27 @@ internal static class EmitLanguageSelector
             return false;
         }
 
-        int offset = SpirvModule.HeaderWordCount;
-        while (offset < words.Length)
+        var reader = new SpirvModule.InstructionReader(words);
+        while (reader.MoveNext())
         {
-            ushort opCode = SpvOpCode.GetOpCode(words[offset]);
-            ushort wordCount = SpvOpCode.GetWordCount(words[offset]);
-
-            if (wordCount == 0 || offset + wordCount > words.Length)
+            var operands = reader.Current;
+            switch (reader.OpCode)
             {
-                return false;
-            }
-
-            ReadOnlySpan<uint> operands = words.Slice(offset, wordCount);
-
-            switch (opCode)
-            {
-                case SpvOpCode.OpCapability when wordCount >= 2:
+                case SpvOpCode.OpCapability when operands.Length >= 2:
                     if (operands[1] is RayQueryProvisionalKhr or RayQueryKhr)
                     {
                         return true;
                     }
                     break;
 
-                case SpvOpCode.OpExtension when wordCount >= 2:
+                case SpvOpCode.OpExtension when operands.Length >= 2:
                     if (SpirvLiteral.ReadString(operands, 1) == RayQueryExtension)
                     {
                         return true;
                     }
                     break;
 
-                case SpvOpCode.OpMemoryModel when wordCount >= 2:
+                case SpvOpCode.OpMemoryModel when operands.Length >= 2:
                     if (operands[1] != AddressingModelLogical)
                     {
                         return true;
@@ -112,8 +103,6 @@ internal static class EmitLanguageSelector
                 case SpvOpCode.OpEntryPoint:
                     return false;
             }
-
-            offset += wordCount;
         }
 
         return false;

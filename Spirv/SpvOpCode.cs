@@ -81,6 +81,10 @@ public static class SpvOpCode
     public const ushort OpImageDrefGather = 97;
     public const ushort OpImageRead = 98;
     public const ushort OpImage = 100;
+    public const ushort OpEmitVertex = 218;
+    public const ushort OpEndPrimitive = 219;
+    public const ushort OpEmitStreamVertex = 220;
+    public const ushort OpEndStreamPrimitive = 221;
     public const ushort OpSelect = 169;
     public const ushort OpLabel = 248;
     public const ushort OpBranch = 249;

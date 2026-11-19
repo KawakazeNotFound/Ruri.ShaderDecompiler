@@ -5,6 +5,7 @@
     <OutputType>Exe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <CheckForOverflowUnderflow>true</CheckForOverflowUnderflow>
     <RootNamespace>Ruri.ShaderTools</RootNamespace>
     <AssemblyName>Ruri.ShaderDecompiler</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

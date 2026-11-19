@@ -40,7 +40,7 @@ public sealed class SpirvFrontend
             FrontendOutput output = frontend.Convert(ShaderBinaryFormatDetector.Detect(ShaderBinaryFormat.Unknown, binary), binary);
             return Spirv.ScalarLayout.ScalarBlockVectorizer.Vectorize(output.Spirv);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             error = exception.Message;
             return null;

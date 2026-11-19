@@ -29,7 +29,8 @@ internal static class VariantChainWriter
         int subShaderIndex,
         int passIndex,
         VariantFileSet variants,
-        string? enginePassKeyword)
+        string? enginePassKeyword,
+        ShaderLabPassAnnotations? passAnnotations)
     {
         writer.Line("HLSLPROGRAM");
 
@@ -62,7 +63,14 @@ internal static class VariantChainWriter
 
         // One multi_compile per variant keyword, deliberately NOT bundled. Bundling
         // makes a set mutually exclusive, which is wrong for independent toggles.
-        foreach (string keyword in KeywordSymbols.ForPass(names, pass))
+        var keywords = KeywordSymbols.ForPass(names, pass);
+        if (passAnnotations is not null)
+        {
+            string? usedEngineKeyword = enginePassKeyword is not null && keywords.Contains(enginePassKeyword) ? enginePassKeyword : null;
+            foreach (string line in passAnnotations(subShaderIndex, passIndex, pass, names, usedEngineKeyword))
+                writer.Line(line);
+        }
+        foreach (string keyword in keywords)
         {
             if (keyword == enginePassKeyword) continue;
             writer.Line($"#pragma multi_compile _ {keyword}");
@@ -88,23 +96,7 @@ internal static class VariantChainWriter
     /// whose only identity is a keyword it cannot name is a variant nobody can tell apart.
     /// </summary>
     private static List<string> EffectiveKeywordNames(List<string> shaderNames, UnitySerializedPass pass)
-    {
-        if (shaderNames.Count > 0)
-        {
-            return shaderNames;
-        }
-
-        List<string> names = [];
-        foreach (UnitySerializedNameIndex entry in pass.NameIndices)
-        {
-            while (names.Count <= entry.Second)
-            {
-                names.Add(string.Empty);
-            }
-            names[entry.Second] = entry.First;
-        }
-        return names;
-    }
+        => LegacyDx11VariantRouting.EffectiveKeywordNames(shaderNames, pass);
 
     private static void WriteStage(
         IndentedWriter writer,
@@ -136,16 +128,15 @@ internal static class VariantChainWriter
 
         // Only the keywords THIS stage uses, so a condition never mentions a
         // keyword the stage is indifferent to.
-        List<ushort> stageKeywords = KeywordSymbols.DistinctIndices(subPrograms);
+        var route = LegacyDx11VariantRouting.BuildStage(subPrograms);
+        List<ushort> stageKeywords = route.Keywords;
 
         // Grouped by keyword set because that is what the #if chain branches on -- NOT to
         // pick one of each. Every subprogram in a group is its own compile with its own
         // bytecode blob and its own decompiled body, and all of them are emitted: a pass with
         // sixteen programs writes sixteen. Keeping the first of each group threw fourteen of
         // those sixteen away and reported "done (16/16 passes)" while doing it.
-        var groups = subPrograms
-            .GroupBy(subProgram => string.Join(",", subProgram.KeywordIndices.OrderBy(static index => index)))
-            .ToList();
+        var groups = route.Groups;
 
         if (groups.Count <= 1)
         {
@@ -171,11 +162,7 @@ internal static class VariantChainWriter
         //   2. otherwise the first listed
         // Runtime keyword state decides which branch actually executes, so a
         // suboptimal catch-all only affects permutations nothing selects.
-        int defaultIndex = groups.FindIndex(static group => group.First().KeywordIndices.Count == 0);
-        if (defaultIndex < 0)
-        {
-            defaultIndex = 0;
-        }
+        int defaultIndex = route.DefaultIndex;
 
         var emitOrder = new List<int>(groups.Count);
         for (int i = 0; i < groups.Count; i++)

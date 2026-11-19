@@ -20,17 +20,20 @@ namespace Ruri.ShaderTools.Unity.ShaderLab;
 /// </summary>
 internal sealed class VariantFileSet
 {
-    private readonly Dictionary<string, string> _files = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _names = new(StringComparer.Ordinal);
+    private readonly Action<string, string>? _writeVariant;
 
     /// <summary>Folder name the <c>#include</c> paths are relative to; null keeps
     /// every variant body inline.</summary>
     public string? FolderName { get; }
 
-    public VariantFileSet(string? folderName) => FolderName = folderName;
+    public VariantFileSet(string? folderName, Action<string, string>? writeVariant = null)
+    {
+        FolderName = folderName;
+        _writeVariant = writeVariant;
+    }
 
     public bool IsSplitting => !string.IsNullOrEmpty(FolderName);
-
-    public IReadOnlyDictionary<string, string> Files => _files;
 
     /// <summary>
     /// Store one variant body and return the <c>#include</c> path for it.
@@ -40,7 +43,7 @@ internal sealed class VariantFileSet
         string extension = string.IsNullOrWhiteSpace(subProgram.SourceFileExtension) ? ".hlsl" : subProgram.SourceFileExtension;
         string fileName = ResolveUniqueName(BuildKey(subShaderIndex, passIndex, stage, subProgram), extension);
 
-        _files[fileName] = BuildContent(stage, subProgram, keywordList, body, legend);
+        _writeVariant!(fileName, BuildContent(stage, subProgram, keywordList, body, legend));
         return $"{FolderName}/{fileName}";
     }
 
@@ -62,7 +65,7 @@ internal sealed class VariantFileSet
     private string ResolveUniqueName(string stem, string extension)
     {
         string candidate = stem + extension;
-        if (!_files.ContainsKey(candidate))
+        if (_names.Add(candidate))
         {
             return candidate;
         }
@@ -70,7 +73,7 @@ internal sealed class VariantFileSet
         for (int n = 2; ; n++)
         {
             candidate = $"{stem}_v{n}{extension}";
-            if (!_files.ContainsKey(candidate))
+            if (_names.Add(candidate))
             {
                 return candidate;
             }

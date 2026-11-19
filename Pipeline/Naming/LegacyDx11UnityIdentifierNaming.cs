@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using Ruri.ShaderTools.Spirv;
 using Ruri.ShaderTools.Spirv.SymbolInjection;
 
@@ -20,15 +20,12 @@ internal static class LegacyDx11UnityIdentifierNaming
     public static byte[] Apply(byte[] bytes)
     {
         // Parse otherwise accepts a malformed trailing instruction. Fail closed.
-        if (bytes.Length < 20 || bytes.Length % 4 != 0)
+        var words = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan());
+        if (words.Length < SpirvModule.HeaderWordCount || bytes.Length % sizeof(uint) != 0)
             throw new ArgumentException("Unity identifier naming: malformed SPIR-V length.");
-        for (int cursor = 20; cursor < bytes.Length;)
-        {
-            int length = (int)(BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(cursor)) >> 16) * 4;
-            if (length < 4 || length > bytes.Length - cursor)
-                throw new ArgumentException("Unity identifier naming: malformed SPIR-V instruction.");
-            cursor += length;
-        }
+        var reader = new SpirvModule.InstructionReader(words);
+        if (!reader.ReadToEnd())
+            throw new ArgumentException("Unity identifier naming: malformed SPIR-V instruction.");
         SpirvModule module = SpirvModule.Parse(bytes);
         var outputs = module.Instructions.Where(i => i.OpCode == 59 && i.WordCount >= 4 && i[3] == 3)
             .Select(i => i[2]).ToHashSet();
