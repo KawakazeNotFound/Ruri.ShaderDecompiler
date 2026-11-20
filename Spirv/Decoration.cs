@@ -28,6 +28,7 @@ public static class Decoration
     public const uint ArrayStride = 6;
     public const uint MatrixStride = 7;
     public const uint BuiltIn = 11;
+    public const uint NonWritable = 24;
     public const uint Location = 30;
 
     /// <summary>First scalar slot a variable occupies within its location, when several share one.</summary>

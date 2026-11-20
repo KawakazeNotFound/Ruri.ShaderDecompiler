@@ -14,14 +14,9 @@ namespace Ruri.ShaderTools.Pipeline.Backend;
 ///
 ///   * a ray-tracing, task or mesh execution model — their built-ins have no
 ///     HLSL representation in the backend;
-///   * a tessellation control or evaluation (hull or domain) execution model. The
-///     backend this build links writes no hull or domain entry at all — no
-///     <c>SV_OutputControlPointID</c>, <c>SV_DomainLocation</c>, <c>SV_TessFactor</c> or
-///     <c>patchconstantfunc</c> anywhere in it — and refuses their built-ins with
-///     "Unsupported builtin in HLSL: 8" (InvocationId) and ": 13" (TessCoord). Every
-///     tessellated material of a shipped title failed that way. A geometry stage is
-///     written in HLSL (<c>maxvertexcount</c>, stream <c>Append</c>/<c>RestartStrip</c>)
-///     and stays there;
+///   * a native tessellation control or evaluation (hull or domain) execution model.
+///     The backend writes no hull or domain entry itself. DXBC SM5.0 tessellation is
+///     planned separately, because that container supplies the original HLSL ABI;
 ///   * inline ray tracing (ray query), a capability usable from any stage, which
 ///     fails deep inside constant emission with a message that blames constants;
 ///   * a physical addressing model (buffer device address), which the backend

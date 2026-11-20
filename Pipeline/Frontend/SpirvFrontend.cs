@@ -3,7 +3,7 @@ using Ruri.ShaderTools.Pipeline.Native;
 namespace Ruri.ShaderTools.Pipeline.Frontend;
 
 /// <summary>What the front end recovered: the module, and the container's own input signature when it had one.</summary>
-internal readonly record struct FrontendOutput(byte[] Spirv, IReadOnlyList<InputSignatureElement> InputSignature);
+internal readonly record struct FrontendOutput(byte[] Spirv, IReadOnlyList<InputSignatureElement> InputSignature, bool PreserveComputeUavNamespace = false);
 
 /// <summary>
 /// Compiled shader binary → SPIR-V, the pipeline's single intermediate form.
@@ -49,28 +49,29 @@ public sealed class SpirvFrontend
 
     public string? LastFailure { get; private set; }
 
-    internal FrontendOutput Convert(ShaderBinaryFormat format, byte[] binary) => format switch
+    internal FrontendOutput Convert(ShaderBinaryFormat format, byte[] binary, uint shaderModel = 0) => format switch
     {
-        ShaderBinaryFormat.Dxbc => ConvertContainer(binary, rawLlvm: false),
+        ShaderBinaryFormat.Dxbc => ConvertContainer(binary, rawLlvm: false, shaderModel == 50 && DxbcContainer.IsComputeShaderModel50(binary)),
         ShaderBinaryFormat.Dxil => ConvertContainer(binary, ShaderBinaryFormatDetector.IsRawLlvmBitcode(binary)),
         ShaderBinaryFormat.SpirV => new FrontendOutput(binary, Array.Empty<InputSignatureElement>()),
         _ => throw new InvalidOperationException($"Unsupported shader format: {format}"),
     };
 
-    private FrontendOutput ConvertContainer(byte[] container, bool rawLlvm)
+    private FrontendOutput ConvertContainer(byte[] container, bool rawLlvm, bool preserveComputeUavNamespace = false)
     {
         if (!rawLlvm && !ShaderBinaryFormatDetector.IsDxbc(container))
         {
             throw new InvalidOperationException("Input does not contain a valid DXBC payload.");
         }
 
-        byte[]? spirv = DxilSpirvLibrary.Convert(container, rawLlvm, out string? error);
+        byte[]? spirv = DxilSpirvLibrary.Convert(container, rawLlvm, out string? error, preserveComputeUavNamespace);
         if (spirv is null)
         {
             LastFailure = error;
             throw new InvalidOperationException($"dxil-spirv did not produce a SPIR-V module. {error}");
         }
 
-        return new FrontendOutput(spirv, DxbcInputSignature.Read(container));
+        if (preserveComputeUavNamespace) spirv = DxbcComputeRegisterSpace.PreserveUavDeclaration(spirv);
+        return new FrontendOutput(spirv, DxbcInputSignature.Read(container), preserveComputeUavNamespace);
     }
 }

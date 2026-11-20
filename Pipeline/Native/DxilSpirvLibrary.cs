@@ -47,7 +47,7 @@ internal static unsafe class DxilSpirvLibrary
     /// <param name="dxil">DXIL/DXBC bytes (when <paramref name="rawLlvm"/> is false) or raw LLVM bitcode.</param>
     /// <param name="rawLlvm">true → <c>dxil_spv_parse_dxil</c> (raw <c>BC\xC0\xDE</c> bitcode);
     /// false → <c>dxil_spv_parse_dxil_blob</c> (a DXBC/DXContainer-wrapped DXIL chunk).</param>
-    public static byte[]? Convert(ReadOnlySpan<byte> dxil, bool rawLlvm, out string? error)
+    public static byte[]? Convert(ReadOnlySpan<byte> dxil, bool rawLlvm, out string? error, bool preserveComputeUavNamespace = false)
     {
         error = null;
         if (dxil.Length < 4) { error = "DXIL input too small."; return null; }
@@ -99,7 +99,7 @@ internal static unsafe class DxilSpirvLibrary
             // shader with "SM 6.6 bindless references must be bindless": on one shipped title
             // that was every ray tracing shader in the install, twelve thousand of them.
             dxil_spv_converter_set_srv_remapper(converter, &RemapSrv, null);
-            dxil_spv_converter_set_uav_remapper(converter, &RemapUav, null);
+            dxil_spv_converter_set_uav_remapper(converter, &RemapUav, preserveComputeUavNamespace ? &converter : null);
             dxil_spv_converter_set_cbv_remapper(converter, &RemapCbv, null);
             dxil_spv_converter_set_sampler_remapper(converter, &RemapSampler, null);
 
@@ -167,7 +167,7 @@ internal static unsafe class DxilSpirvLibrary
         else
         {
             vk->Buffer.UseHeap = 0;
-            vk->Buffer.Set = d3d->RegisterSpace;
+            vk->Buffer.Set = userdata == null ? d3d->RegisterSpace : Frontend.DxbcComputeRegisterSpace.UnorderedAccessSet;
             vk->Buffer.Binding = d3d->RegisterIndex;
         }
 

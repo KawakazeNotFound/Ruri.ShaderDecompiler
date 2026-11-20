@@ -3,6 +3,7 @@
 using ResourceBinding = (string Name, int Binding, int Set, Ruri.ShaderTools.ShaderResourceType Type, char RegisterType);
 
 using Ruri.ShaderTools.Spirv.SymbolInjection;
+using Ruri.ShaderTools.Pipeline.Frontend;
 
 namespace Ruri.ShaderTools.Pipeline.Naming;
 
@@ -40,7 +41,7 @@ internal sealed class ResourceNamePlanner
     /// </param>
     public ResourceNamePlanner(Func<int, int, string?> resolveBlockName) => _resolveBlockName = resolveBlockName;
 
-    public List<NamePatch> Plan(IReadOnlyList<DescriptorBindingInfo> bindings, SerializedProgramData symbols)
+    public List<NamePatch> Plan(IReadOnlyList<DescriptorBindingInfo> bindings, SerializedProgramData symbols, bool preserveComputeUavNamespace = false)
     {
         var patches = new List<NamePatch>();
         var patchedIds = new HashSet<uint>();
@@ -54,7 +55,7 @@ internal sealed class ResourceNamePlanner
                 continue;
             }
 
-            foreach (DescriptorBindingInfo binding in Match(bindings, resource))
+            foreach (DescriptorBindingInfo binding in Match(bindings, resource, preserveComputeUavNamespace))
             {
                 if (patchedIds.Contains(binding.Id))
                 {
@@ -134,11 +135,14 @@ internal sealed class ResourceNamePlanner
             ? _resolveBlockName(resource.Set, resource.Binding) ?? resource.Name
             : resource.Name;
 
-    public static IEnumerable<DescriptorBindingInfo> Match(IReadOnlyList<DescriptorBindingInfo> bindings, ResourceBinding resource)
+    public static IEnumerable<DescriptorBindingInfo> Match(IReadOnlyList<DescriptorBindingInfo> bindings, ResourceBinding resource,
+        bool preserveComputeUavNamespace = false)
     {
+        int set = preserveComputeUavNamespace && resource.RegisterType == 'u' ? DxbcComputeRegisterSpace.UnorderedAccessSet : resource.Set;
         foreach (DescriptorBindingInfo binding in bindings)
         {
-            if (binding.Set == resource.Set && binding.Binding == resource.Binding && Matches(resource.RegisterType, binding.Kind))
+            bool isComputeUavImage = preserveComputeUavNamespace && resource.RegisterType == 'u' && binding.Kind == DescriptorKind.SampledImage;
+            if (binding.Set == set && binding.Binding == resource.Binding && (Matches(resource.RegisterType, binding.Kind) || isComputeUavImage))
             {
                 yield return binding;
             }

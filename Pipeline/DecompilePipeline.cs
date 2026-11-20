@@ -46,7 +46,7 @@ internal sealed class DecompilePipeline
 
         try
         {
-            FrontendOutput frontend = _frontend.Convert(format, binary);
+            FrontendOutput frontend = _frontend.Convert(format, binary, shaderModel);
 
             stage = DecompileStage.ScalarLayoutNormalization;
             byte[] spirv = ScalarBlockVectorizer.Vectorize(frontend.Spirv);
@@ -68,16 +68,20 @@ internal sealed class DecompilePipeline
             List<BoundMemberName> bound = Bind(options, structured, symbols);
 
             stage = DecompileStage.SymbolInjection;
-            (byte[] injected, List<FlattenedBlock> flattened) = Inject(structured, symbols, bound);
-            if (shaderModel == 50) injected = LegacyDx11UnityIdentifierNaming.Apply(injected);
+            (byte[] injected, List<FlattenedBlock> flattened) = Inject(structured, symbols, bound, frontend.PreserveComputeUavNamespace);
+            EntryPointSelection entry = EntryPointResolver.Resolve(injected, symbols.EntryPoint);
+            bool legacyTessellation = format == ShaderBinaryFormat.Dxbc && shaderModel == 50 &&
+                entry.Stage is PipelineStage.TessControl or PipelineStage.TessEvaluation;
+            if (shaderModel == 50 && !legacyTessellation) injected = LegacyDx11UnityIdentifierNaming.Apply(injected);
             deepestModule = injected;
             if (captureStages) result.SpirvAfterSymbolInjection = injected;
 
             stage = DecompileStage.SourceEmission;
-            EntryPointSelection entry = EntryPointResolver.Resolve(injected, symbols.EntryPoint);
-            EmitLanguage language = EmitLanguageSelector.Select(injected, entry);
+            EmitLanguage language = legacyTessellation ? EmitLanguage.Hlsl : EmitLanguageSelector.Select(injected, entry);
             EmissionPlan plan = BuildPlan(language, entry, shaderModel, frontend.InputSignature, options.VertexInputs, flattened);
-            string source = Emit(injected, symbols, plan);
+            string source = legacyTessellation
+                ? LegacyDx11TessellationEmitter.Emit(binary, HlslStructTypeNaming.Disambiguate(injected, plan.FlattenedBlocks), plan, _driver)
+                : Emit(injected, symbols, plan);
 
             result.Success = true;
             result.FailedStage = DecompileStage.Completed;
@@ -160,7 +164,8 @@ internal sealed class DecompilePipeline
         return bound;
     }
 
-    private (byte[] Spirv, List<FlattenedBlock> Flattened) Inject(byte[] spirv, SerializedProgramData symbols, List<BoundMemberName> bound)
+    private (byte[] Spirv, List<FlattenedBlock> Flattened) Inject(byte[] spirv, SerializedProgramData symbols, List<BoundMemberName> bound,
+        bool preserveComputeUavNamespace)
     {
         try
         {
@@ -175,7 +180,7 @@ internal sealed class DecompilePipeline
             if (symbols.GetResourceBindingCount() != 0)
             {
                 List<DescriptorBindingInfo> bindings = BindingScanner.Scan(spirv);
-                names = new ResourceNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols);
+                names = new ResourceNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols, preserveComputeUavNamespace);
                 members = new BlockMemberNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols);
                 CollectFlattenedBlocks(bindings, names, members, flattened);
             }

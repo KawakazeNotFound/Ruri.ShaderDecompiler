@@ -117,6 +117,8 @@ public static class LegacyDx11InterfaceLinker
                 result.Status = "SKIPPED_NO_GPU_PROGRAMS";
                 return result;
             }
+            if (slots.Any(slot => slot.Stage is "Hull" or "Domain"))
+                return LegacyDx11TessellationInterfaceLinker.Link(pass, resolveOriginalBinary);
             if (slots.Any(slot => slot.Stage == "Geometry"))
             {
                 // A geometry pass has two distinct interface edges. Never treat
