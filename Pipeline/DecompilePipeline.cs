@@ -329,6 +329,7 @@ internal sealed class DecompilePipeline
 
     private string Emit(byte[] spirv, SerializedProgramData symbols, EmissionPlan plan)
     {
+        spirv = HlslStructTypeNaming.Disambiguate(spirv, plan.FlattenedBlocks);
         string? source;
         if (plan.ShaderModel == 50 && plan.Language == EmitLanguage.Hlsl)
         {
