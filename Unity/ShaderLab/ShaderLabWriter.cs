@@ -10,7 +10,16 @@ namespace Ruri.ShaderTools.Unity.ShaderLab;
 /// </summary>
 public sealed record ShaderLabDocument(string ShaderText, IReadOnlyDictionary<string, string> VariantFiles);
 
-public delegate IEnumerable<string> ShaderLabPassAnnotations(int subShaderIndex, int passIndex,
+public enum ShaderLabKeywordLayout
+{
+    Independent,
+    CacheGroups,
+    CacheStageGroups,
+}
+
+public sealed record ShaderLabPassDirectives(IEnumerable<string> Annotations, ShaderLabKeywordLayout KeywordLayout);
+
+public delegate ShaderLabPassDirectives ShaderLabPassOptions(int subShaderIndex, int passIndex,
     UnitySerializedPass pass, IReadOnlyList<string> keywordNames, string? enginePassKeyword);
 
 /// <summary>
@@ -25,8 +34,8 @@ public delegate IEnumerable<string> ShaderLabPassAnnotations(int subShaderIndex,
 public static class ShaderLabWriter
 {
     /// <summary>Render with every variant body inline.</summary>
-    public static string Write(UnityShaderMetadata metadata, ShaderLabPassAnnotations? passAnnotations = null)
-        => Render(metadata, new VariantFileSet(folderName: null), passAnnotations);
+    public static string Write(UnityShaderMetadata metadata, ShaderLabPassOptions? passOptions = null)
+        => Render(metadata, new VariantFileSet(folderName: null), passOptions);
 
     /// <summary>
     /// Render with each multi-variant stage's bodies split into
@@ -37,25 +46,25 @@ public static class ShaderLabWriter
     /// per stage, and inlining them all produces a file large enough to stall an
     /// editor import.
     /// </summary>
-    public static ShaderLabDocument WriteSplit(UnityShaderMetadata metadata, string variantFolderName, ShaderLabPassAnnotations? passAnnotations = null)
+    public static ShaderLabDocument WriteSplit(UnityShaderMetadata metadata, string variantFolderName, ShaderLabPassOptions? passOptions = null)
     {
         var files = new Dictionary<string, string>(StringComparer.Ordinal);
-        string shaderText = WriteSplitTo(metadata, variantFolderName, files.Add, passAnnotations);
+        string shaderText = WriteSplitTo(metadata, variantFolderName, files.Add, passOptions);
         return new ShaderLabDocument(shaderText, files);
     }
 
     public static string WriteSplitTo(UnityShaderMetadata metadata, string variantFolderName, Action<string, string> writeVariant,
-        ShaderLabPassAnnotations? passAnnotations = null)
+        ShaderLabPassOptions? passOptions = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(variantFolderName);
         ArgumentNullException.ThrowIfNull(writeVariant);
         // Splitting is offered to the whole document; each STAGE then decides whether it has
         // anything to split (see WriteStage). A shader no stage splits adds no files and gets
         // no folder.
-        return Render(metadata, new VariantFileSet(variantFolderName, writeVariant), passAnnotations);
+        return Render(metadata, new VariantFileSet(variantFolderName, writeVariant), passOptions);
     }
 
-    private static string Render(UnityShaderMetadata metadata, VariantFileSet variants, ShaderLabPassAnnotations? passAnnotations)
+    private static string Render(UnityShaderMetadata metadata, VariantFileSet variants, ShaderLabPassOptions? passOptions)
     {
         ArgumentNullException.ThrowIfNull(metadata);
 
@@ -67,7 +76,7 @@ public static class ShaderLabWriter
 
         for (int subShaderIndex = 0; subShaderIndex < metadata.ParsedForm.SubShaders.Count; subShaderIndex++)
         {
-            WriteSubShader(writer, metadata, metadata.ParsedForm.SubShaders[subShaderIndex], subShaderIndex, variants, passAnnotations);
+            WriteSubShader(writer, metadata, metadata.ParsedForm.SubShaders[subShaderIndex], subShaderIndex, variants, passOptions);
         }
 
         if (!string.IsNullOrWhiteSpace(metadata.ParsedForm.FallbackName))
@@ -115,7 +124,7 @@ public static class ShaderLabWriter
         UnitySerializedSubShader subShader,
         int subShaderIndex,
         VariantFileSet variants,
-        ShaderLabPassAnnotations? passAnnotations)
+        ShaderLabPassOptions? passOptions)
     {
         writer.Line("SubShader {");
         writer.Indent();
@@ -128,7 +137,7 @@ public static class ShaderLabWriter
 
         for (int passIndex = 0; passIndex < subShader.Passes.Count; passIndex++)
         {
-            WritePass(writer, metadata, subShader, subShader.Passes[passIndex], subShaderIndex, passIndex, variants, passAnnotations);
+            WritePass(writer, metadata, subShader, subShader.Passes[passIndex], subShaderIndex, passIndex, variants, passOptions);
         }
 
         writer.Unindent();
@@ -143,7 +152,7 @@ public static class ShaderLabWriter
         int subShaderIndex,
         int passIndex,
         VariantFileSet variants,
-        ShaderLabPassAnnotations? passAnnotations)
+        ShaderLabPassOptions? passOptions)
     {
         if (!string.IsNullOrWhiteSpace(pass.UseName))
         {
@@ -183,7 +192,7 @@ public static class ShaderLabWriter
         if (HasAnyProgram(pass))
         {
             VariantChainWriter.WriteProgram(writer, metadata.ParsedForm.KeywordNames, pass, subShaderIndex, passIndex, variants,
-                ShaderLabDeclarations.EnginePassKeyword(subShaderTags.Concat(stateTags).Concat(passTags)), passAnnotations);
+                ShaderLabDeclarations.EnginePassKeyword(subShaderTags.Concat(stateTags).Concat(passTags)), passOptions);
         }
 
         writer.Unindent();

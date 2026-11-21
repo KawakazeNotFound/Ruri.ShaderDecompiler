@@ -30,7 +30,7 @@ internal static class VariantChainWriter
         int passIndex,
         VariantFileSet variants,
         string? enginePassKeyword,
-        ShaderLabPassAnnotations? passAnnotations)
+        ShaderLabPassOptions? passOptions)
     {
         writer.Line("HLSLPROGRAM");
 
@@ -61,20 +61,16 @@ internal static class VariantChainWriter
         // could ever be taken and every variant fell through to the catch-all.
         List<string> names = EffectiveKeywordNames(keywordNames, pass);
 
-        // One multi_compile per variant keyword, deliberately NOT bundled. Bundling
-        // makes a set mutually exclusive, which is wrong for independent toggles.
         var keywords = KeywordSymbols.ForPass(names, pass);
-        if (passAnnotations is not null)
+        string? usedEngineKeyword = enginePassKeyword is not null && keywords.Contains(enginePassKeyword) ? enginePassKeyword : null;
+        var directives = passOptions?.Invoke(subShaderIndex, passIndex, pass, names, usedEngineKeyword);
+        if (directives is not null)
         {
-            string? usedEngineKeyword = enginePassKeyword is not null && keywords.Contains(enginePassKeyword) ? enginePassKeyword : null;
-            foreach (string line in passAnnotations(subShaderIndex, passIndex, pass, names, usedEngineKeyword))
+            foreach (string line in directives.Annotations)
                 writer.Line(line);
         }
-        foreach (string keyword in keywords)
-        {
-            if (keyword == enginePassKeyword) continue;
-            writer.Line($"#pragma multi_compile _ {keyword}");
-        }
+        VariantKeywordPragmas.Write(writer, pass, names, keywords, usedEngineKeyword,
+            directives?.KeywordLayout ?? ShaderLabKeywordLayout.Independent);
 
         writer.Blank();
 
